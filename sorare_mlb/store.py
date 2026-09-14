@@ -136,13 +136,32 @@ class LocalStore(Store):
 _store: Store | None = None
 
 
+def _find_env(*suffixes: str) -> str | None:
+    """Najde proměnnou podle konce názvu.
+
+    Upstash integrace ve Vercelu umí proměnné prefixovat názvem projektu
+    (``soraremlb_KV_REST_API_URL``), takže přesná shoda nestačí. Nejdřív
+    zkoušíme přesný název, pak cokoli, co daným suffixem končí.
+    """
+    for suffix in suffixes:
+        if os.environ.get(suffix):
+            return os.environ[suffix]
+
+    for suffix in suffixes:
+        for key, value in os.environ.items():
+            # Read-only token by nám na zápis nestačil.
+            if key.endswith(suffix) and "READ_ONLY" not in key and value:
+                return value
+    return None
+
+
 def get_store() -> Store:
     global _store
     if _store is not None:
         return _store
 
-    url = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
-    token = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    url = _find_env("KV_REST_API_URL", "UPSTASH_REDIS_REST_URL")
+    token = _find_env("KV_REST_API_TOKEN", "UPSTASH_REDIS_REST_TOKEN")
     _store = UpstashStore(url, token) if url and token else LocalStore()
     return _store
 
