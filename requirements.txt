@@ -1,6 +1,6 @@
+fastapi>=0.115
 requests>=2.32
 bcrypt>=4.1
 PuLP>=2.8
 PyYAML>=6.0
-python-dotenv>=1.0
-rich>=13.7
+pyotp>=2.9

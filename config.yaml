@@ -72,6 +72,10 @@ safety:
   exclude_injured: true
   # Vyloučit hráče, jejichž tým daný den nehraje.
   require_scheduled_game: true
+  # Hráč, který nenastoupil do zápasu za tolik dní, do sestavy nepatří —
+  # typicky sedí na lavičce, je na farmě nebo se z něj stal záskok.
+  # Oficiální MLB lineupy chodí pozdě, tohle je spolehlivější náhrada.
+  max_days_without_game: 7
   # Kolik minut před deadlinem začít hlídat oficiální lineupy.
   lineup_check_window_minutes: 180
 

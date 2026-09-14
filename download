@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 .env
-.tokens.json
-.cache.sqlite
-out/
+.env.local
+.local-store.json
+.vercel/
 .pytest_cache/

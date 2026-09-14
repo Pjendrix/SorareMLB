@@ -1,108 +1,210 @@
-# Sorare MLB Lineup Builder
+# Sorare MLB — automatické sestavy
 
-Poloautomatický nástroj pro skládání sestav na Sorare MLB. Navrhne sestavy pro
-**Hot Streaks** (priorita 1) a **Challenger** (priorita 2) jedním společným
-optimalizačním modelem, ukáže je k odsouhlasení a teprve po potvrzení je odešle.
+Webová aplikace, která skládá sestavy pro **Hot Streaks** a **Challenger**.
+Spustíš ji tlačítkem na stránce, nebo si ji necháš běžet automaticky před
+deadlinem gameweeku. Výsledek ti přijde na Discord/Telegram.
 
-> **Režim:** návrh → potvrzení → odeslání. Nic se neodesílá bez tvého explicitního `yes`.
-
----
-
-## Co to dělá
-
-1. Stáhne tvoje karty ze Sorare (`currentUser.baseballCards`) a nadcházející fixtures/turnaje.
-2. Stáhne reálný MLB rozpis, probable pitchery, zranění a lineupy z **MLB StatsAPI** (zdarma, bez klíče).
-3. Spočítá projekci bodů pro každou kartu (Sorare L15/L5 + MLB StatsAPI korekce).
-4. Jedním ILP modelem rozdělí karty mezi turnaje tak, aby se maximalizoval vážený užitek
-   (Hot Streaks má vyšší váhu než Challenger) — karta může být jen v jedné sestavě.
-5. Před deadlinem umí sestavy revalidovat (`check`) a nahradit hráče, kteří nejsou v oficiálním lineupu.
-
-## Proč ILP a ne "nejdřív Hot Streaks, pak zbytek"
-
-Greedy postup (vezmi top karty do HS, zbytek do Challengeru) je systematicky horší:
-karta, která je v HS jen o chlup lepší než alternativa, může v Challengeru chybět
-kriticky. ILP řeší přiřazení karta×turnaj globálně s tvrdými omezeními na pozice
-a unikátnost karty. Viz `src/sorare_mlb/optimizer.py`.
+Běží na Vercelu (free plán), stav drží v Upstash Redis (taky free).
 
 ---
 
-## Instalace
+## Jak to funguje
 
-```bash
-git clone <tvoje-repo>
-cd sorare-mlb-lineups
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"      # nebo: pip install -r requirements.txt
-cp .env.example .env    # a vyplň
+```
+Tlačítko na webu  ─┐
+GitHub Actions cron ─┼──► /api/cron ──► pipeline ──► Sorare submitLineup
+Vercel cron        ─┘                      │
+                                           └──► Discord / Telegram
 ```
 
-## Přihlášení
+Pipeline je stavový automat:
 
-Dvě cesty, obě uloží JWT do `.tokens.json` (v `.gitignore`):
-
-```bash
-# A) e-mail + heslo (heslo se hashuje bcryptem lokálně, na server jde jen hash)
-python -m sorare_mlb login --method password
-
-# B) OAuth "Login with Sorare" — otevře prohlížeč, callback na localhost
-python -m sorare_mlb login --method oauth
+```
+QUEUED → CARDS → SCORES → MLB → OPTIMIZE → VALIDATE → SUBMIT → DONE
+                                              ↓
+                                        NEEDS_REVIEW   (blokující nález
+                                                        nebo režim „jen návrh")
 ```
 
-Pro OAuth musíš mít v Sorare developer nastavení jako redirect URI přesně
-`http://localhost:8731/callback` (port lze změnit v `.env`).
+Vercel Hobby ukončí funkci po 60 s, což na celý průchod nestačí. Každý krok
+proto pracuje jen do vyčerpání rozpočtu (výchozí 40 s), uloží stav do Redisu
+a zavolá sám sebe znovu. Web zatím jen pollinguje `/api/status`.
 
-## Použití
+---
+
+## Nasazení
+
+### 1. Sorare
+
+Vygeneruj si **nový** API klíč (ten předchozí, pokud jsi ho někde vystavil,
+nejdřív zruš).
+
+**2FA je podporované.** Sorare JWT platí 30 dní, takže se jednou za měsíc
+přihlásíš na `/login`: klikneš na tlačítko, opíšeš kód z autentikátoru a hotovo.
+Všechno ostatní včetně automatického odesílání pak jede samo. Heslo se zadává
+jen do env proměnných, formulářem neputuje.
+
+Když token vyprší, cron ti pošle notifikaci místo tichého selhání. Týden předem
+navíc dostaneš připomínku.
+
+### 2. Redis
+
+V Vercel dashboardu → Storage → Marketplace → **Upstash Redis**, vytvoř
+databázi a připoj ji k projektu. Vercel ti sám doplní `KV_REST_API_URL`
+a `KV_REST_API_TOKEN`.
+
+> Bez Redisu aplikace spadne na lokální soubor, který na Vercelu mezi
+> invokacemi zmizí — pipeline se pak nikdy nedokončí. `/api/health` tě na to
+> upozorní.
+
+### 3. Deploy
 
 ```bash
-python -m sorare_mlb probe                 # ověří schéma API proti tvým dotazům (spusť první!)
-python -m sorare_mlb cards                 # vypíše portfolio a cache ho
-python -m sorare_mlb build                 # navrhne sestavy, uloží do out/lineups-<gw>.json
-python -m sorare_mlb build --explain       # + rozpad projekce hráče po hráči
-python -m sorare_mlb submit out/lineups-42.json   # zeptá se a teprve pak odešle
-python -m sorare_mlb check out/lineups-42.json    # kontrola lineupů před deadlinem
+git init && git add . && git commit -m "init"
+git remote add origin git@github.com:<ty>/SorareMLB.git
+git push -u origin main
+```
+
+Na Vercelu naimportuj repozitář. Framework preset nech na **Other** — Python
+entrypoint `api/index.py` si najde sám podle `vercel.json`.
+
+### 4. Proměnné prostředí
+
+V Vercel → Settings → Environment Variables:
+
+| Proměnná | Povinná | Poznámka |
+|---|---|---|
+| `SORARE_API_KEY` | ano | zvyšuje rate limit |
+| `SORARE_EMAIL` | ano | |
+| `SORARE_PASSWORD` | ano | hashuje se lokálně, na server jde jen hash |
+| `SORARE_JWT_AUD` | ano | libovolný string, ale **neměň ho** po prvním přihlášení |
+| `SORARE_TOTP_SECRET` | ne | plně automatické přihlášení — viz varování níže |
+| `INTERNAL_SECRET` | ano | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `APP_BASE_URL` | doporučeno | `https://tvuj-projekt.vercel.app` |
+| `KV_REST_API_URL` / `_TOKEN` | ano | doplní Upstash integrace |
+| `DISCORD_WEBHOOK_URL` | volitelné | nebo `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` |
+| `CRON_MODE` | volitelné | `auto` (odešle) nebo `propose` (jen navrhne) |
+
+Po deployi otevři `/api/health` — vypíše, co chybí.
+
+### 5. Ověř schéma API
+
+```
+GET /api/probe   (hlavička X-Internal-Secret)
+```
+
+Cokoli s `false` znamená, že Sorare přejmenovalo pole. Oprav `sorare_mlb/queries.py`.
+Udělej to dřív, než se spolehneš na automatický běh.
+
+### 6. Přesný cron přes GitHub Actions
+
+Vercel Hobby cron umí **jen jednou denně** a čas negarantuje — může se opozdit
+i o hodinu. Pro běh navázaný na deadline to nestačí, proto je v repozitáři
+`.github/workflows/trigger.yml`.
+
+V GitHubu → Settings → Secrets and variables → Actions přidej:
+- `APP_BASE_URL`
+- `INTERNAL_SECRET`
+
+Pak si v tom souboru uprav časy. Výchozí jsou pondělí a pátek 21:40 UTC, což
+odpovídá zhruba 20 minutám před typickým prvním zápasem gameweeku. **Zkontroluj
+si to proti reálným deadlinům svého fixture** — cron nezná rozpis MLB.
+
+Vercel cron v `vercel.json` zůstává jako záloha na 14:00 UTC.
+
+---
+
+## Používání
+
+Poprvé (a pak jednou za 30 dní) jdi na `/login` a přihlas se kódem
+z autentikátoru. Na hlavní stránce pak:
+- **Navrhnout sestavy** — projde pipeline a zastaví se před odesláním
+- **Navrhnout a odeslat** — projde to celé včetně submitu
+- U návrhu se pak objeví tlačítko pro potvrzení
+
+Automatický běh se řídí `CRON_MODE`.
+
+---
+
+## Bezpečnostní pojistka
+
+Na oficiální MLB lineupy se spolehnout nedá — zveřejňují se pozdě a u ranních
+běhů vůbec. Blokující kritéria jsou proto ta, která jsou dostupná vždycky:
+
+- hráč je na **IL** nebo restricted listu,
+- jeho **tým v tomhle gameweeku nehraje**,
+- **nenastoupil do zápasu déle než 7 dní** (`safety.max_days_without_game`) —
+  typicky sedí na lavičce nebo je na farmě
+
+Datum posledního zápasu se bere ze stejné odpovědi Sorare API jako skóre, takže
+filtr nestojí ani jedno volání navíc.
+
+Když validace najde blokující problém, **sestavy se neodešlou** ani v režimu
+`auto` — dostaneš notifikaci s návrhem náhrady. Oficiální lineup se použije,
+když náhodou k dispozici je, ale jen jako varování, nikdy jako důvod běh
+zablokovat.
+
+### K TOTP secretu
+
+`SORARE_TOTP_SECRET` zařídí, že se přihlášení obnovuje samo a na `/login` už
+nemusíš. Cena za to je, že oba faktory autentizace leží na stejném serveru —
+kdo se dostane k proměnným, dostane se k účtu. Ruční kód jednou za měsíc je
+levná pojistka; nech to vypnuté, dokud ti to nezačne vadit.
+
+---
+
+## Lokální vývoj
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env    # vyplň
+uvicorn api.index:app --reload --port 8000
+```
+
+Bez `KV_REST_API_*` se použije `.local-store.json`, takže Redis lokálně
+nepotřebuješ.
+
+```bash
+pytest -q     # 23 testů (optimalizátor, pipeline, 2FA), žádná síť
 ```
 
 ---
 
-## Konfigurace (`config.yaml`)
+## Co hlídat
 
-Nejdůležitější části:
-
-- `positions` — mapování Sorare `activePositions` na sloty CI/MI/OF/EH/Flex.
-  **Ověř si to** `probe`em; Sorare občas mění názvy a zařazení catchera.
-- `weights.hot_streaks` / `weights.challenger` — relativní priorita turnajů v ILP.
-- `stack.bonus` — bonus za každého dalšího pálkaře ze stejného MLB týmu (stack).
-- `safety.min_projected_floor` — karta s nižším floorem se do Hot Streaks nepustí.
-- `projection` — váhy jednotlivých vstupů (L15, L5, matchup, ballpark, K%).
-
----
-
-## Známé limity a věci, které musíš hlídat
-
-1. **Schéma Sorare API se mění.** Dotazy v `queries.py` odpovídají stavu k datu
-   commitu. `probe` ti řekne, co se rozbilo, ještě než přijdeš o gameweek.
-2. **Projekce nejsou magie.** Bez placeného zdroje (THE BAT X, Steamer) jsou
-   projekce odvozené z formy + matchupu. Je to lepší než náhoda, není to edge.
-3. **Oficiální lineupy MLB chodí pozdě** — u večerních zápasů často 1–2 h před
-   startem, někdy méně. `check` proto spouštěj opakovaně, ne jednou 30 min předem.
-4. **Lock je per gameweek**, ne per zápas. Po locku už `submit` neprojde.
-5. **Rate limit.** Bez API klíče narazíš rychle. Klient má backoff + cache portfolia
-   v SQLite (`.cache.sqlite`), aby se karty netahaly při každém běhu.
-6. **Nikdy necommituj `.env` ani `.tokens.json`.** Jsou v `.gitignore`, ale zkontroluj si to.
+1. **Token platí 30 dní.** Hlavní stránka i cron ti připomenou obnovu týden
+   předem. Když to prošvihneš, sestavy se neodešlou.
+2. **Schéma Sorare API se mění.** `/api/probe` po každém delším výpadku.
+3. **Mapování pozic** v `config.yaml` → `lineup.slots`. Hlavně kam Sorare řadí
+   catchera. Špatné mapování = prázdný slot a spadlý job.
+4. **Párování jmen** Sorare ↔ MLB jede přes normalizované jméno. Duplicity
+   (Luis García) doplň do `mlb.manual_player_map`.
+5. **Projekce nejsou edge.** Bez placeného zdroje jde o formu + matchup.
+   Je to lepší než náhoda, ale nečekej zázraky.
+6. **Auto-submit je tvoje odpovědnost.** Pipeline se snaží nezkazit gameweek,
+   ale sleduj notifikace — hlavně první dva týdny.
+7. **Nikdy necommituj `.env`.** Je v `.gitignore`, ale ověř si to.
 
 ## Struktura
 
 ```
-src/sorare_mlb/
-  auth.py         přihlášení (password / OAuth), správa JWT
-  client.py       GraphQL klient, rate limit, retry, cache
-  queries.py      všechny GraphQL dotazy a mutace na jednom místě
-  mlb.py          MLB StatsAPI — rozpis, probables, lineupy, zranění
-  models.py       datové typy (Card, Player, Game, Lineup, Tournament)
-  projections.py  výpočet projekce a floor/ceiling
-  optimizer.py    ILP model přes všechny turnaje
-  validator.py    kontrola sestav před deadlinem
-  cli.py          příkazová řádka
+api/index.py             FastAPI app, všechny endpointy
+sorare_mlb/
+  runner.py              stavový automat pipeline
+  store.py               Redis/lokální úložiště
+  client.py              Sorare GraphQL klient
+  auth.py                dvoufázové přihlášení s OTP, správa JWT
+  queries.py             GraphQL dotazy — jediné místo k opravě při změně API
+  mlb.py                 MLB StatsAPI
+  projections.py         výpočet projekcí
+  optimizer.py           ILP přes všechny turnaje
+  validator.py           kontrola před deadlinem
+  notify.py              Discord / Telegram
+  ui.py                  hlavní stránka
+  login_ui.py            přihlašovací stránka (2FA)
+config.yaml              pravidla formátu, váhy, bezpečnostní limity
+tests/                   optimalizátor + celá pipeline, bez sítě
 ```
 
 ## Licence
