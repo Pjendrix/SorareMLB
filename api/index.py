@@ -29,6 +29,25 @@ from sorare_mlb.ui import PAGE  # noqa: E402
 
 app = FastAPI(title="Sorare MLB Lineups", docs_url=None, redoc_url=None)
 
+
+@app.middleware("http")
+async def normalize_vercel_path(request: Request, call_next):
+    """Srovná cestu, když ji Vercel přepíše na /api/index.
+
+    Podle typu konfigurace (rewrites vs. routes) dorazí do funkce buď
+    původní cesta, nebo cesta na samotný soubor. Tohle pojistí obojí, ať
+    aplikace nevrací 404 kvůli detailu v vercel.json.
+    """
+    path = request.scope.get("path", "")
+    if path in ("/api/index", "/api/index.py"):
+        original = (
+            request.headers.get("x-vercel-original-path")
+            or request.headers.get("x-forwarded-uri")
+            or "/"
+        )
+        request.scope["path"] = original.split("?")[0] or "/"
+    return await call_next(request)
+
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
 
