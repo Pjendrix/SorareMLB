@@ -39,8 +39,17 @@ class ProjectionEngine:
 
     # ------------------------------------------------------------------ public
 
-    def project(self, card: Card, scores: list[float]) -> Projection:
+    def project(
+        self, card: Card, scores: list[float], last_game: str | None = None
+    ) -> Projection:
         from . import mlb
+
+        inactive_days = self._days_since(last_game)
+        max_gap = self.config.get_path("safety.max_days_without_game")
+        if max_gap and inactive_days is not None and inactive_days > float(max_gap):
+            return self._unplayable(
+                card, f"nenastoupil {int(inactive_days)} dní (limit {max_gap})"
+            )
 
         mlb_player = self._match_player(card)
         if mlb_player is None:
@@ -187,6 +196,18 @@ class ProjectionEngine:
             components=comp,
             notes=notes,
         )
+
+    @staticmethod
+    def _days_since(iso_date: str | None) -> float | None:
+        """Kolik dní uplynulo od posledního odehraného zápasu."""
+        if not iso_date:
+            return None
+        try:
+            played = datetime.fromisoformat(str(iso_date).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        now = datetime.now(tz=played.tzinfo) if played.tzinfo else datetime.now()
+        return (now - played).total_seconds() / 86400
 
     def _is_hitter(self, card: Card) -> bool:
         return any(p in self.hitter_positions for p in card.positions)

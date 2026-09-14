@@ -1,8 +1,15 @@
 """Kontrola sestav před uzávěrkou.
 
-Oficiální lineupy MLB chodí pozdě a nepravidelně — u prvního zápasu dne někdy
-3 h předem, u večerních často těsně. Proto tenhle modul nic neodesílá sám:
-vyhodnotí sestavu, označí rizikové hráče a navrhne náhradu z lavičky.
+Na oficiální MLB lineupy se spolehnout nedá — zveřejňují se pozdě, nepravidelně
+a u ranních běhů vůbec. Blokující kritéria jsou proto ta, která jsou k dispozici
+vždycky:
+
+* hráč je na IL nebo restricted listu,
+* jeho tým v tomhle gameweeku nehraje,
+* dlouho nenastoupil (řeší se už v projekcích, tady se jen revaliduje).
+
+Oficiální lineup se použije, když náhodou k dispozici je — ale jen jako
+varování, nikdy jako důvod sestavu zablokovat.
 """
 from __future__ import annotations
 
@@ -69,6 +76,15 @@ class LineupValidator:
                     )
                     continue
 
+                projection = self.projections.get(slot.card_slug)
+                if projection is not None and not projection.playable:
+                    issues.append(
+                        Issue(lineup.tournament_name, slot.slot, slot.player_name, "blocker",
+                              projection.reason_unplayable or "hráč není použitelný",
+                              self._suggest(card, slot.slot, used))
+                    )
+                    continue
+
                 game = self._game_for(player.get("team_id"))
                 if game is None:
                     issues.append(
@@ -84,18 +100,17 @@ class LineupValidator:
                 confirmed = lineup_cache[game_pk]
 
                 if not confirmed:
-                    issues.append(
-                        Issue(lineup.tournament_name, slot.slot, slot.player_name,
-                              "warning", "oficiální lineup zatím nezveřejněn")
-                    )
+                    # Běžný stav, ne problém — nezahlcujeme tím výpis.
                     continue
 
                 all_ids = {pid for ids in confirmed.values() for pid in ids}
                 is_pitcher = "pitcher" in " ".join(card.positions)
                 if not is_pitcher and player["id"] not in all_ids:
+                    # Varování, ne blocker: lineup mohl být zveřejněn jen částečně
+                    # a zbytečné blokování by zabránilo odeslání úplně.
                     issues.append(
-                        Issue(lineup.tournament_name, slot.slot, slot.player_name, "blocker",
-                              "není v oficiální základní sestavě",
+                        Issue(lineup.tournament_name, slot.slot, slot.player_name, "warning",
+                              "není v právě zveřejněné základní sestavě",
                               self._suggest(card, slot.slot, used))
                     )
 

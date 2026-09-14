@@ -1,0 +1,286 @@
+"""Vercel entrypoint — FastAPI aplikace.
+
+Endpointy:
+    GET  /                webové rozhraní
+    POST /api/build       spustí job (mode=auto|propose), vrátí job_id
+    POST /api/continue    interní — navázání dalšího kroku (chráněno secretem)
+    GET  /api/status      stav posledního / konkrétního jobu
+    POST /api/submit      ručně odešle sestavy z jobu ve stavu NEEDS_REVIEW
+    GET  /api/cron        volá cron (Vercel i GitHub Actions), chráněno secretem
+    GET  /api/health      diagnostika konfigurace
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sorare_mlb import runner  # noqa: E402
+from sorare_mlb.models import Config  # noqa: E402
+from sorare_mlb.store import get_store  # noqa: E402
+from sorare_mlb.auth import AuthError, OtpRequired, complete_login, start_login, token_status  # noqa: E402
+from sorare_mlb.login_ui import LOGIN_PAGE  # noqa: E402
+from sorare_mlb.ui import PAGE  # noqa: E402
+
+app = FastAPI(title="Sorare MLB Lineups", docs_url=None, redoc_url=None)
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+
+
+def _config() -> Config:
+    return Config.load(CONFIG_PATH)
+
+
+def _require_auth() -> None:
+    if not token_status()["authenticated"]:
+        raise HTTPException(
+            401, "Chybí platný Sorare token. Přihlas se na /login."
+        )
+
+
+def _check_secret(provided: str | None, request: Request) -> None:
+    """Cron i interní navázání musí prokázat znalost secretu.
+
+    Vercel cron posílá Authorization: Bearer <CRON_SECRET>, GitHub Actions
+    posílá vlastní hlavičku. Přijímáme obojí.
+    """
+    expected = os.environ.get("INTERNAL_SECRET") or os.environ.get("CRON_SECRET")
+    if not expected:
+        raise HTTPException(500, "INTERNAL_SECRET není nastaven — endpoint je zakázaný.")
+
+    auth = request.headers.get("authorization", "")
+    bearer = auth[7:] if auth.lower().startswith("bearer ") else None
+
+    if provided != expected and bearer != expected:
+        raise HTTPException(401, "Neplatný secret.")
+
+
+# --------------------------------------------------------------------- UI
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return PAGE
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page() -> str:
+    return LOGIN_PAGE
+
+
+# --------------------------------------------------------------------- auth
+
+
+@app.get("/api/auth/status")
+def auth_status() -> JSONResponse:
+    return JSONResponse(token_status())
+
+
+@app.post("/api/auth/start")
+def auth_start() -> JSONResponse:
+    """První fáze přihlášení. Heslo bere z env, ne z formuláře."""
+    try:
+        token = start_login()
+    except OtpRequired:
+        return JSONResponse({"state": "otp_required"})
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return JSONResponse(
+        {"state": "authenticated", "nickname": token.nickname, "user_slug": token.user_slug}
+    )
+
+
+@app.post("/api/auth/otp")
+def auth_otp(payload: dict) -> JSONResponse:
+    code = (payload or {}).get("code", "")
+    try:
+        token = complete_login(code)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return JSONResponse(
+        {
+            "state": "authenticated",
+            "nickname": token.nickname,
+            "user_slug": token.user_slug,
+            "days_left": round(token.days_left, 1),
+        }
+    )
+
+
+# --------------------------------------------------------------------- API
+
+
+@app.post("/api/build")
+def build(payload: dict | None = None, background: BackgroundTasks = None) -> JSONResponse:
+    mode = (payload or {}).get("mode", "propose")
+    if mode not in ("auto", "propose"):
+        raise HTTPException(400, "mode musí být 'auto' nebo 'propose'")
+
+    _require_auth()
+    job = runner.create_job(mode=mode)
+    background.add_task(runner.advance, job, _config())
+    return JSONResponse({"job_id": job.id, "state": job.state})
+
+
+@app.post("/api/continue")
+def continue_job(
+    payload: dict,
+    request: Request,
+    background: BackgroundTasks,
+    x_internal_secret: str | None = Header(default=None),
+) -> JSONResponse:
+    _check_secret(x_internal_secret, request)
+    job = runner.load(payload.get("job_id", ""))
+    if job is None:
+        raise HTTPException(404, "Job nenalezen (možná vypršel).")
+    background.add_task(runner.advance, job, _config())
+    return JSONResponse({"job_id": job.id, "state": job.state})
+
+
+@app.get("/api/status")
+def status(job_id: str | None = None) -> JSONResponse:
+    job = runner.load(job_id) if job_id else runner.latest_job()
+    if job is None:
+        return JSONResponse({"state": "NONE", "message": "Zatím žádný běh."})
+    return JSONResponse(
+        {
+            "job_id": job.id,
+            "state": job.state,
+            "mode": job.mode,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+            "steps": job.steps[-15:],
+            "error": job.error,
+            "lineups": job.lineups,
+            "issues": job.issues,
+            "submitted": job.submitted,
+            "progress_remaining": len(job.pending_player_slugs),
+        }
+    )
+
+
+@app.post("/api/submit")
+def submit(payload: dict | None, background: BackgroundTasks) -> JSONResponse:
+    job = runner.load((payload or {}).get("job_id", "")) or runner.latest_job()
+    if job is None:
+        raise HTTPException(404, "Není co odesílat.")
+    if job.state != "NEEDS_REVIEW":
+        raise HTTPException(409, f"Job je ve stavu {job.state}, odeslat lze jen NEEDS_REVIEW.")
+    if not job.lineups:
+        raise HTTPException(409, "Job nemá žádné sestavy.")
+
+    blockers = [i for i in job.issues if i.get("severity") == "blocker"]
+    force = bool((payload or {}).get("force"))
+    if blockers and not force:
+        raise HTTPException(
+            409,
+            "Sestavy mají blokující nálezy. Odeslat je můžeš jen s force=true, "
+            "ale radši je nejdřív oprav.",
+        )
+
+    job.state = "SUBMIT"
+    job.log_step("Ruční odeslání potvrzeno")
+    runner.save(job)
+    background.add_task(runner.advance, job, _config())
+    return JSONResponse({"job_id": job.id, "state": job.state})
+
+
+@app.get("/api/cron")
+def cron(
+    request: Request,
+    x_internal_secret: str | None = Header(default=None),
+    background: BackgroundTasks = None,
+) -> JSONResponse:
+    _check_secret(x_internal_secret, request)
+
+    # Pokud předchozí job ještě běží, nespouštíme druhý — jen ho postrčíme dál.
+    previous = runner.latest_job()
+    if previous and previous.state not in ("DONE", "FAILED", "NEEDS_REVIEW"):
+        background.add_task(runner.advance, previous, _config())
+        return JSONResponse({"job_id": previous.id, "state": previous.state, "resumed": True})
+
+    status_ = token_status()
+    if not status_["authenticated"]:
+        # Cron nesmí tiše selhat — dej vědět, ať se stihne přihlásit.
+        from sorare_mlb import notify
+
+        notify.notify(
+            "🔑 **Sorare token vypršel.** Přihlas se na /login, jinak se sestavy neodešlou."
+        )
+        raise HTTPException(401, "Chybí platný token, přihlas se na /login.")
+
+    if status_["needs_login"]:
+        from sorare_mlb import notify
+
+        notify.notify(
+            f"🔑 Sorare token platí ještě {status_['days_left']} dní — obnov ho na /login."
+        )
+
+    mode = os.environ.get("CRON_MODE", "auto")
+    job = runner.create_job(mode=mode)
+    background.add_task(runner.advance, job, _config())
+    return JSONResponse({"job_id": job.id, "state": job.state, "mode": mode})
+
+
+@app.get("/api/probe")
+def probe(request: Request, x_internal_secret: str | None = Header(default=None)) -> JSONResponse:
+    """Ověří, že dotazy v queries.py sedí na aktuální schéma Sorare.
+
+    Baseballová část API se mění a hůř se dokumentuje než fotbalová — tohle
+    spusť po každém delším výpadku, ideálně dřív než ti uteče gameweek.
+    """
+    _check_secret(x_internal_secret, request)
+    from sorare_mlb.client import SorareClient
+
+    client = SorareClient(_config())
+    schema = client.introspect_root()
+    q = {f["name"] for f in (schema.get("queryType") or {}).get("fields", [])}
+    m = {f["name"] for f in (schema.get("mutationType") or {}).get("fields", [])}
+
+    inputs = {}
+    for type_name in ("createBaseballLineupInput", "submitLineupInput"):
+        info = client.introspect_type(type_name)
+        if info:
+            inputs[type_name] = [f["name"] for f in (info.get("inputFields") or [])]
+
+    return JSONResponse(
+        {
+            "queries": {name: name in q for name in ("currentUser", "baseball", "baseballPlayers")},
+            "mutations": {
+                name: name in m
+                for name in ("createBaseballLineup", "submitLineup", "signIn")
+            },
+            "input_fields": inputs,
+            "hint": "Cokoli s false oprav v sorare_mlb/queries.py.",
+        }
+    )
+
+
+@app.get("/api/health")
+def health() -> JSONResponse:
+    required = ["SORARE_EMAIL", "SORARE_PASSWORD", "SORARE_API_KEY", "INTERNAL_SECRET"]
+    auth = token_status()
+    optional = [
+        "KV_REST_API_URL", "KV_REST_API_TOKEN", "APP_BASE_URL",
+        "DISCORD_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    ]
+    store_kind = type(get_store()).__name__
+    return JSONResponse(
+        {
+            "ok": all(os.environ.get(k) for k in required) and auth["authenticated"],
+            "auth": auth,
+            "store": store_kind,
+            "store_warning": (
+                "LocalStore na Vercelu nepřežije mezi invokacemi — nastav KV_REST_API_*."
+                if store_kind == "LocalStore" and os.environ.get("VERCEL") else None
+            ),
+            "required": {k: bool(os.environ.get(k)) for k in required},
+            "optional": {k: bool(os.environ.get(k)) for k in optional},
+            "config_found": CONFIG_PATH.exists(),
+        }
+    )
