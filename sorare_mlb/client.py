@@ -84,6 +84,21 @@ class SorareClient:
                 time.sleep(1.5 ** attempt)
                 continue
 
+            if resp.status_code in (400, 422):
+                # Neplatný dotaz. Detail je v těle odpovědi — bez něj se
+                # nedá poznat, které pole Sorare přejmenovalo.
+                try:
+                    detail = resp.json()
+                    messages = "; ".join(
+                        e.get("message", "?") for e in (detail.get("errors") or [])
+                    ) or str(detail)[:400]
+                except ValueError:
+                    messages = resp.text[:400]
+                raise SorareError(
+                    f"Sorare odmítlo dotaz ({operation_name or 'bez názvu'}): {messages}\n"
+                    "Schéma se nejspíš změnilo — otevři /api/probe a uprav queries.py."
+                )
+
             resp.raise_for_status()
             body = resp.json()
             if body.get("errors") and not tolerate_errors:
