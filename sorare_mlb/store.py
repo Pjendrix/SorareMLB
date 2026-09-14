@@ -21,6 +21,10 @@ import requests
 LOCAL_FILE = Path(".local-store.json")
 
 
+class StoreUnavailable(RuntimeError):
+    """Úložiště není nakonfigurované nebo do něj nelze zapsat."""
+
+
 class Store:
     """Jednoduché key-value s TTL."""
 
@@ -90,7 +94,18 @@ class LocalStore(Store):
             return {}
 
     def _write(self, data: dict) -> None:
-        LOCAL_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            LOCAL_FILE.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            # Na Vercelu je filesystem read-only. Bez Redisu se stav nemá kam
+            # uložit a přihlášení ani pipeline nemůžou fungovat.
+            raise StoreUnavailable(
+                "Není nakonfigurované úložiště. Přidej v Vercelu integraci "
+                "Upstash Redis (Storage → Marketplace) — doplní proměnné "
+                "KV_REST_API_URL a KV_REST_API_TOKEN — a udělej redeploy."
+            ) from exc
 
     def get(self, key: str) -> Any | None:
         with self._lock:
