@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# Konfigurace Sorare MLB Lineup Builderu.
+# Vše, co se může časem změnit na straně Sorare, je tady a ne v kódu.
+# ---------------------------------------------------------------------------
+
+# Formát sestavy: 7 slotů. Klíč = název slotu, hodnota = povolené Sorare pozice.
+# POZOR: ověř si názvy přes `python -m sorare_mlb probe`. Zařazení catchera
+# se v minulosti měnilo.
+lineup:
+  size: 7
+  slots:
+    SP:   [starting_pitcher]
+    RP:   [relief_pitcher]
+    CI:   [first_base, third_base, catcher]
+    MI:   [second_base, shortstop]
+    OF:   [outfield]
+    EH:   [first_base, third_base, catcher, second_base, shortstop, outfield, designated_hitter]
+    FLEX: [first_base, third_base, catcher, second_base, shortstop, outfield, designated_hitter]
+
+  # Pozice považované za pálkaře (pro stack bonus a projekce).
+  hitter_positions:
+    [first_base, third_base, catcher, second_base, shortstop, outfield, designated_hitter]
+  pitcher_positions: [starting_pitcher, relief_pitcher]
+
+# Turnaje, o které se staráme. `slug` musí odpovídat slugu ze Sorare API —
+# `probe` ti vypíše, co je aktuálně dostupné.
+tournaments:
+  - name: Hot Streaks
+    slug_contains: hot-streak
+    weight: 3.0            # priorita v ILP účelové funkci
+    risk_mode: safe        # safe = maximalizuje floor, upside = maximalizuje ceiling
+    require_confirmed_lineup: true
+    max_lineups: 1
+  - name: Challenger
+    slug_contains: challenger
+    weight: 1.0
+    risk_mode: upside
+    require_confirmed_lineup: false
+    max_lineups: 3
+
+# Váhy vstupů do projekce bodů. Součet nemusí být 1, normalizuje se.
+projection:
+  hitter:
+    l15_avg: 0.45          # průměr posledních 15 Sorare skóre
+    l5_avg: 0.25           # nedávná forma
+    season_avg: 0.10
+    matchup: 0.12          # kvalita soupeřova nadhazovače (opačně)
+    ballpark: 0.08         # park factor pro daný stadion
+  pitcher:
+    l15_avg: 0.30
+    l5_avg: 0.15
+    k_rate: 0.25           # K% — hlavní driver Sorare bodů u SP
+    opp_offense: 0.20      # slabost soupeřova lineupu
+    home_field: 0.10
+  # Kolik Sorare skóre musí mít karta odehráno, aby se jí věřilo.
+  min_games_for_trust: 5
+  # Fallback skóre pro hráče bez historie (aby ILP nepadal).
+  cold_start_score: 20.0
+
+# Stacking — bonus za koncentraci pálkařů z jednoho reálného týmu.
+stack:
+  enabled: true
+  bonus: 3.5               # bodů za každého pálkaře nad prvního ze stejného týmu
+  max_from_team: 4         # tvrdý strop (Sorare limit bývá 4, ověř si)
+  apply_to: [Hot Streaks]  # stack chceme hlavně ve vlajkové sestavě
+
+# Bezpečnostní pravidla.
+safety:
+  # Karta se nepustí do Hot Streaks, pokud její odhadovaný floor je pod tímhle.
+  min_projected_floor: 12.0
+  # Vyloučit hráče na IL bez ohledu na projekci.
+  exclude_injured: true
+  # Vyloučit hráče, jejichž tým daný den nehraje.
+  require_scheduled_game: true
+  # Kolik minut před deadlinem začít hlídat oficiální lineupy.
+  lineup_check_window_minutes: 180
+
+# Karty, které se nikdy nemají použít (slug karty).
+blacklist_cards: []
+
+# Rarity, se kterými pracujeme.
+rarities: [limited, rare, super_rare, unique]
+
+api:
+  sorare_url: https://api.sorare.com/graphql
+  mlb_url: https://statsapi.mlb.com/api/v1
+  requests_per_minute: 40
+  cache_ttl_minutes: 30
