@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sorare_mlb import runner  # noqa: E402
 from sorare_mlb.models import Config  # noqa: E402
-from sorare_mlb.store import get_store  # noqa: E402
+from sorare_mlb.store import StoreUnavailable, get_store  # noqa: E402
 from sorare_mlb.auth import AuthError, OtpRequired, complete_login, start_login, token_status  # noqa: E402
 from sorare_mlb.login_ui import LOGIN_PAGE  # noqa: E402
 from sorare_mlb.ui import PAGE  # noqa: E402
@@ -109,6 +109,10 @@ def auth_start() -> JSONResponse:
         return JSONResponse({"state": "otp_required"})
     except AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except StoreUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — holá 500 se v prohlížeči špatně ladí
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
     return JSONResponse(
         {"state": "authenticated", "nickname": token.nickname, "user_slug": token.user_slug}
     )
@@ -121,6 +125,10 @@ def auth_otp(payload: dict) -> JSONResponse:
         token = complete_login(code)
     except AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except StoreUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
     return JSONResponse(
         {
             "state": "authenticated",
@@ -295,7 +303,9 @@ def health() -> JSONResponse:
             "auth": auth,
             "store": store_kind,
             "store_warning": (
-                "LocalStore na Vercelu nepřežije mezi invokacemi — nastav KV_REST_API_*."
+                "Chybí Redis. Přidej Upstash integraci ve Vercelu (Storage → "
+                "Marketplace) a udělej redeploy — bez toho nefunguje přihlášení "
+                "ani pipeline."
                 if store_kind == "LocalStore" and os.environ.get("VERCEL") else None
             ),
             "required": {k: bool(os.environ.get(k)) for k in required},
