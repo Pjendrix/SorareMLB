@@ -255,13 +255,17 @@ def cron(
 
 
 @app.get("/api/probe")
-def probe(request: Request, x_internal_secret: str | None = Header(default=None)) -> JSONResponse:
+def probe(
+    request: Request,
+    secret: str | None = None,
+    x_internal_secret: str | None = Header(default=None),
+) -> JSONResponse:
     """Ověří, že dotazy v queries.py sedí na aktuální schéma Sorare.
 
     Baseballová část API se mění a hůř se dokumentuje než fotbalová — tohle
     spusť po každém delším výpadku, ideálně dřív než ti uteče gameweek.
     """
-    _check_secret(x_internal_secret, request)
+    _check_secret(x_internal_secret or secret, request)
     from sorare_mlb.client import SorareClient
 
     client = SorareClient(_config())
@@ -275,6 +279,17 @@ def probe(request: Request, x_internal_secret: str | None = Header(default=None)
         if info:
             inputs[type_name] = [f["name"] for f in (info.get("inputFields") or [])]
 
+    # Skutečná pole typů, na kterých dotazy stojí. Podle tohohle se
+    # queries.py opravuje.
+    types = {}
+    for type_name in (
+        "User", "BaseballCard", "BaseballPlayer", "Baseball",
+        "BaseballFixture", "BaseballCompetition",
+    ):
+        info = client.introspect_type(type_name)
+        if info:
+            types[type_name] = [f["name"] for f in (info.get("fields") or [])]
+
     return JSONResponse(
         {
             "queries": {name: name in q for name in ("currentUser", "baseball", "baseballPlayers")},
@@ -283,6 +298,7 @@ def probe(request: Request, x_internal_secret: str | None = Header(default=None)
                 for name in ("createBaseballLineup", "submitLineup", "signIn")
             },
             "input_fields": inputs,
+            "types": types,
             "hint": "Cokoli s false oprav v sorare_mlb/queries.py.",
         }
     )
