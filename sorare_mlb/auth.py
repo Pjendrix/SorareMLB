@@ -45,9 +45,15 @@ class AuthError(RuntimeError):
 
 
 class OtpRequired(AuthError):
-    """Server čeká na kód z autentikátoru."""
+    """Server čeká na kód z autentikátoru.
 
-    def __init__(self, challenge: str):
+    Sorare to hlásí dvěma způsoby podle typu 2FA:
+      * vrátí ``otpSessionChallenge`` — kód se posílá s tímhle challenge,
+      * vrátí chybu ``2fa_missing`` — kód se posílá znovu s e-mailem a heslem.
+    Ukládáme, co přišlo, a druhá fáze se podle toho zařídí.
+    """
+
+    def __init__(self, challenge: str | None = None):
         super().__init__("Sorare vyžaduje kód z autentikátoru.")
         self.challenge = challenge
 
@@ -113,6 +119,9 @@ def _call_sign_in(sign_in_input: dict) -> dict:
     data = (payload.get("data") or {}).get("signIn") or {}
     if data.get("errors"):
         messages = "; ".join(e.get("message", "?") for e in data["errors"])
+        # Tohle není chyba, jen žádost o druhý faktor.
+        if "2fa_missing" in messages or "otp" in messages.lower():
+            raise OtpRequired(None)
         raise AuthError(f"signIn selhal: {messages}")
     return data
 
@@ -158,14 +167,24 @@ def start_login(email: str | None = None, password: str | None = None) -> Token:
     email = email or env("SORARE_EMAIL", required=True)
     password = password or env("SORARE_PASSWORD", required=True)
 
-    data = _call_sign_in({"email": email, "password": _hash_password(email, password)})
+    secret = os.environ.get("SORARE_TOTP_SECRET")
+
+    try:
+        data = _call_sign_in(
+            {"email": email, "password": _hash_password(email, password)}
+        )
+    except OtpRequired:
+        # Varianta "2fa_missing": žádný challenge, kód se pošle s přihlašovacími
+        # údaji znovu. Ukládáme prázdnou značku, ať druhá fáze ví, co dělat.
+        get_store().set(K_OTP_CHALLENGE, "__credentials__", ttl_seconds=600)
+        if secret:
+            return complete_login(_generate_totp(secret))
+        raise
 
     challenge = data.get("otpSessionChallenge")
     if challenge:
         # Challenge má krátkou platnost; 10 minut je víc než dost na opsání kódu.
         get_store().set(K_OTP_CHALLENGE, challenge, ttl_seconds=600)
-
-        secret = os.environ.get("SORARE_TOTP_SECRET")
         if secret:
             return complete_login(_generate_totp(secret), challenge)
         raise OtpRequired(challenge)
@@ -177,13 +196,27 @@ def complete_login(otp_code: str, challenge: str | None = None) -> Token:
     """Druhá fáze — dokončí přihlášení kódem z autentikátoru."""
     challenge = challenge or get_store().get(K_OTP_CHALLENGE)
     if not challenge:
-        raise AuthError("Chybí OTP challenge nebo už vypršel. Začni přihlášení znovu.")
+        raise AuthError(
+            "Platnost přihlášení vypršela (10 minut). Klikni znovu na tlačítko "
+            "Začít přihlášení a zadej čerstvý kód."
+        )
 
     code = "".join(ch for ch in str(otp_code) if ch.isdigit())
     if len(code) != 6:
         raise AuthError("Kód musí mít šest číslic.")
 
-    data = _call_sign_in({"otpSessionChallenge": challenge, "otpAttempt": code})
+    if challenge == "__credentials__":
+        email = env("SORARE_EMAIL", required=True)
+        password = env("SORARE_PASSWORD", required=True)
+        sign_in_input = {
+            "email": email,
+            "password": _hash_password(email, password),
+            "otpAttempt": code,
+        }
+    else:
+        sign_in_input = {"otpSessionChallenge": challenge, "otpAttempt": code}
+
+    data = _call_sign_in(sign_in_input)
     token = _persist(_token_from_response(data))
     get_store().delete(K_OTP_CHALLENGE)
     return token
