@@ -119,9 +119,11 @@ def _call_sign_in(sign_in_input: dict) -> dict:
     data = (payload.get("data") or {}).get("signIn") or {}
     if data.get("errors"):
         messages = "; ".join(e.get("message", "?") for e in data["errors"])
-        # Tohle není chyba, jen žádost o druhý faktor.
+        # Tohle není chyba, jen žádost o druhý faktor. Sorare přitom vrací
+        # otpSessionChallenge ve STEJNÉ odpovědi vedle chyby — bez něj druhá
+        # fáze skončí na "invalid", takže si ho odsud musíme vzít.
         if "2fa_missing" in messages or "otp" in messages.lower():
-            raise OtpRequired(None)
+            raise OtpRequired(data.get("otpSessionChallenge"))
         raise AuthError(f"signIn selhal: {messages}")
     return data
 
@@ -173,12 +175,14 @@ def start_login(email: str | None = None, password: str | None = None) -> Token:
         data = _call_sign_in(
             {"email": email, "password": _hash_password(email, password)}
         )
-    except OtpRequired:
-        # Varianta "2fa_missing": žádný challenge, kód se pošle s přihlašovacími
-        # údaji znovu. Ukládáme prázdnou značku, ať druhá fáze ví, co dělat.
-        get_store().set(K_OTP_CHALLENGE, "__credentials__", ttl_seconds=600)
+    except OtpRequired as exc:
+        # Když challenge v odpovědi byl, použijeme ho. Když ne, druhá fáze
+        # pošle kód spolu s přihlašovacími údaji.
+        get_store().set(
+            K_OTP_CHALLENGE, exc.challenge or "__credentials__", ttl_seconds=600
+        )
         if secret:
-            return complete_login(_generate_totp(secret))
+            return complete_login(_generate_totp(secret), exc.challenge)
         raise
 
     challenge = data.get("otpSessionChallenge")
