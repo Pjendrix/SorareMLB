@@ -73,7 +73,7 @@ projection:
 stack:
   enabled: true
   bonus: 3.5               # bodů za každého pálkaře nad prvního ze stejného týmu
-  max_from_team: 4         # tvrdý strop (Sorare limit bývá 4, ověř si)
+  max_from_team: 6         # tvrdý strop podle pravidel Sorare MLB
   apply_to: [Hot Streaks]  # stack chceme hlavně ve vlajkové sestavě
 
 # Bezpečnostní pravidla.
