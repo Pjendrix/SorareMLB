@@ -484,17 +484,41 @@ def starters(
     if slug:
         boards = [b for b in boards if slug in b.get("slug", "")]
 
-    results = []
-    for board in boards[:8]:
-        found, error = client.fetch_probable_starters(board["slug"], min_odds)
-        results.append(
+    # Postupně ubíráme filtry, ať je vidět, který z nich lavičku vyprázdní.
+    variants = [
+        ("bez filtrů", {}),
+        ("includeNoGame=true", {"includeNoGame": True}),
+        ("odds>=1", {"starterOddsBasisPointsRange": {"min": 1}}),
+        (f"odds>={min_odds}", {"starterOddsBasisPointsRange": {"min": min_odds}}),
+        (
+            f"odds>={min_odds} + includeUsed",
             {
-                "leaderboard": board.get("slug"),
-                "count": len(found),
-                "players": sorted(found)[:40],
-                "error": error,
-            }
-        )
+                "starterOddsBasisPointsRange": {"min": min_odds},
+                "includeNoGame": False,
+                "includeUsed": True,
+            },
+        ),
+    ]
+
+    results = []
+    for board in boards[:2]:
+        board_result = {"leaderboard": board.get("slug"), "variants": []}
+        for label, filters in variants:
+            nodes, error = client.fetch_bench(board["slug"], filters, limit_pages=2)
+            board_result["variants"].append(
+                {
+                    "filtr": label,
+                    "count": len(nodes),
+                    "error": error,
+                    "ukazka": [
+                        f"{(n.get('anyPlayer') or {}).get('displayName')} "
+                        f"({n.get('position')})"
+                        for n in nodes[:5]
+                    ],
+                }
+            )
+        results.append(board_result)
+
     return JSONResponse({"min_odds": min_odds, "results": results})
 
 
