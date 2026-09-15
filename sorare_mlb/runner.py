@@ -352,10 +352,11 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
 
     for spec in config.get("tournaments", []):
         needle = str(spec.get("slug_contains", "")).lower()
+        rarity = str(spec.get("rarity", "")).lower()
         matches = [
             b for b in available
             if needle in str(b.get("slug", "")).lower()
-            or needle in str(b.get("displayName", "")).lower()
+            and (not rarity or str(b.get("rarityType", "")).lower() == rarity)
         ]
         if not matches:
             job.log_step(f"Turnaj '{spec['name']}' nenalezen — přeskakuji")
