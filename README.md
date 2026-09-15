@@ -87,14 +87,20 @@ V Vercel → Settings → Environment Variables:
 
 Po deployi otevři `/api/health` — vypíše, co chybí.
 
-### 5. Ověř schéma API
+### 5. Ověření schématu API
+
+Introspekce (`__schema`) je pro API klíče **zakázaná**, takže se schéma ověřuje
+proti veřejnému SDL:
 
 ```
-GET /api/probe   (hlavička X-Internal-Secret)
+/api/schema?secret=XXX&type=Query
+/api/schema?secret=XXX&type=createOrUpdateSo5LineupInput
+/api/schema?secret=XXX&type=So5Leaderboard&grep=cutoff
 ```
 
-Cokoli s `false` znamená, že Sorare přejmenovalo pole. Oprav `sorare_mlb/queries.py`.
-Udělej to dřív, než se spolehneš na automatický běh.
+Endpoint stáhne https://api.sorare.com/graphql/schema a vrátí definici jednoho
+typu. Když Sorare něco přejmenuje, tohle ti ukáže aktuální tvar a opravíš
+`sorare_mlb/queries.py`.
 
 ### 6. Přesný cron přes GitHub Actions
 
@@ -166,7 +172,7 @@ Bez `KV_REST_API_*` se použije `.local-store.json`, takže Redis lokálně
 nepotřebuješ.
 
 ```bash
-pytest -q     # 23 testů (optimalizátor, pipeline, 2FA), žádná síť
+pytest -q     # 30 testů (optimalizátor, pipeline, 2FA), žádná síť
 ```
 
 ---
@@ -175,9 +181,10 @@ pytest -q     # 23 testů (optimalizátor, pipeline, 2FA), žádná síť
 
 1. **Token platí 30 dní.** Hlavní stránka i cron ti připomenou obnovu týden
    předem. Když to prošvihneš, sestavy se neodešlou.
-2. **Schéma Sorare API se mění.** `/api/probe` po každém delším výpadku.
-3. **Mapování pozic** v `config.yaml` → `lineup.slots`. Hlavně kam Sorare řadí
-   catchera. Špatné mapování = prázdný slot a spadlý job.
+2. **Schéma Sorare API se mění.** `/api/schema?type=...` po každém delším výpadku.
+3. **Mapování pozic** v `config.yaml` → `lineup.slots`. Pozice jsou VELKÝMI
+   písmeny (`STARTING_PITCHER`, `FIRST_BASE`, …). Catchera řadím pod CI —
+   ověř si, že to Sorare dělá taky. Špatné mapování = prázdný slot a spadlý job.
 4. **Párování jmen** Sorare ↔ MLB jede přes normalizované jméno. Duplicity
    (Luis García) doplň do `mlb.manual_player_map`.
 5. **Projekce nejsou edge.** Bez placeného zdroje jde o formu + matchup.
@@ -196,6 +203,7 @@ sorare_mlb/
   client.py              Sorare GraphQL klient
   auth.py                dvoufázové přihlášení s OTP, správa JWT
   queries.py             GraphQL dotazy — jediné místo k opravě při změně API
+                         (MLB jede přes So5 s argumentem sport: BASEBALL)
   mlb.py                 MLB StatsAPI
   projections.py         výpočet projekcí
   optimizer.py           ILP přes všechny turnaje

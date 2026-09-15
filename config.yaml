@@ -9,18 +9,18 @@
 lineup:
   size: 7
   slots:
-    SP:   [starting_pitcher]
-    RP:   [relief_pitcher]
-    CI:   [first_base, third_base, catcher]
-    MI:   [second_base, shortstop]
-    OF:   [outfield]
-    EH:   [first_base, third_base, catcher, second_base, shortstop, outfield, designated_hitter]
-    FLEX: [first_base, third_base, catcher, second_base, shortstop, outfield, designated_hitter]
+    SP:   [STARTING_PITCHER]
+    RP:   [RELIEF_PITCHER]
+    CI:   [FIRST_BASE, THIRD_BASE, CATCHER]
+    MI:   [SECOND_BASE, SHORTSTOP]
+    OF:   [OUTFIELD]
+    EH:   [FIRST_BASE, THIRD_BASE, CATCHER, SECOND_BASE, SHORTSTOP, OUTFIELD, DESIGNATED_HITTER]
+    FLEX: [FIRST_BASE, THIRD_BASE, CATCHER, SECOND_BASE, SHORTSTOP, OUTFIELD, DESIGNATED_HITTER]
 
   # Pozice považované za pálkaře (pro stack bonus a projekce).
   hitter_positions:
-    [first_base, third_base, catcher, second_base, shortstop, outfield, designated_hitter]
-  pitcher_positions: [starting_pitcher, relief_pitcher]
+    [FIRST_BASE, THIRD_BASE, CATCHER, SECOND_BASE, SHORTSTOP, OUTFIELD, DESIGNATED_HITTER]
+  pitcher_positions: [STARTING_PITCHER, RELIEF_PITCHER]
 
 # Turnaje, o které se staráme. `slug` musí odpovídat slugu ze Sorare API —
 # `probe` ti vypíše, co je aktuálně dostupné.
