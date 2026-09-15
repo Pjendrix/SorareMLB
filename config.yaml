@@ -42,9 +42,9 @@ tournaments:
     risk_mode: safe        # safe = maximalizuje floor, upside = maximalizuje ceiling
     require_confirmed_lineup: true
     max_lineups: 1
-    # Hot Streak Champion je in-season soutěž: nejvýš jedna karta
-    # z předchozí sezóny. Vynechej klíč úplně, když turnaj neomezuje.
-    max_non_in_season: 1
+    # Hot Streak Champion je in-season soutěž: ze sedmi karet jich musí mít
+    # aspoň 6 season bonus. Vynechej klíč, když turnaj neomezuje.
+    min_in_season: 6
   - name: Challenger
     slug_contains: challenger
     rarity: limited
