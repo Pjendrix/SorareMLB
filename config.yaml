@@ -85,6 +85,9 @@ safety:
   # Pozor: MLB pálkaři mají obrovský rozptyl skóre, takže floor vychází nízko
   # i u kvalitních hráčů. Nastav 0 pro vypnutí; nad ~8 začne prořezávat hodně.
   min_projected_floor: 0.0
+  # Startující nadhazovač musí být ohlášený jako probable pitcher některého
+  # zápasu v gameweeku. Bez toho hrozí, že vůbec nenastoupí = nula bodů.
+  require_probable_pitcher: true
   # Vyloučit hráče na IL bez ohledu na projekci.
   exclude_injured: true
   # Vyloučit hráče, jejichž tým daný den nehraje.
