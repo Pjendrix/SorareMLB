@@ -68,6 +68,9 @@ class Card:
     in_season: bool = True
     # Sorare projekce na příští gameweek (None = Sorare hráče nečeká).
     sorare_projection: float | None = None
+    # Sorare hráče vede mezi ohlášenými startéry příštího zápasu ("PP").
+    # None = Sorare o zápasu nic neví.
+    sorare_probable_starter: bool | None = None
 
     @property
     def positions(self) -> list[str]:

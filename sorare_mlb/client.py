@@ -264,7 +264,21 @@ def card_from_dict(node: dict) -> Card:
         # při validaci sestavy — rozhoduje ročník karty.
         in_season=int(node.get("seasonYear") or 0) >= _current_season(),
         sorare_projection=_as_float(raw.get("nextClassicFixtureProjectedScore")),
+        sorare_probable_starter=_probable_starter(raw),
     )
+
+
+def _probable_starter(raw: dict) -> bool | None:
+    """Je hráč mezi ohlášenými startéry svého příštího zápasu?
+
+    None znamená, že Sorare o příštím zápase nic nevrátilo — tehdy se
+    rozhoduje podle MLB StatsAPI.
+    """
+    game = raw.get("nextGame")
+    if not game or "probablePitchers" not in game:
+        return None
+    slugs = {p.get("slug") for p in (game.get("probablePitchers") or [])}
+    return raw.get("slug") in slugs
 
 
 def _as_float(value) -> float | None:

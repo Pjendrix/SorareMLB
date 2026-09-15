@@ -37,9 +37,16 @@ query UserBaseballCards($rarities: [Rarity!], $after: String) {
         anyPlayer {
           slug
           displayName
-          # Sorare projekce na příští gameweek. U SP je to zároveň příznak
-          # "projected pitcher" — nadhazovač bez startu má 0 nebo null.
+          # Projekce skóre na příští gameweek (není to příznak startu!).
           nextClassicFixtureProjectedScore
+          # Tohle je zdroj odznaku "PP" na kartě: Sorare vede u zápasu
+          # vlastní seznam ohlášených startérů, a to dřív než MLB StatsAPI.
+          nextGame(so5FixtureEligible: true) {
+            ... on GameOfBaseball {
+              id
+              probablePitchers { slug }
+            }
+          }
           playerGameScores(last: 15) {
             score
             anyGame { date }
