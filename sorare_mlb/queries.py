@@ -109,19 +109,20 @@ mutation CreateOrUpdateSo5Lineup($input: createOrUpdateSo5LineupInput!) {
 # konkrétní leaderboard, sedí to na správný gameweek. (`nextGame` na hráči
 # vrací nejbližší zápas vůbec, což u vícedenního gameweeku ukazuje jinam.)
 PROBABLE_STARTERS = """
-query ProbableStarters($slug: String!, $minOdds: Int!) {
+query ProbableStarters($slug: String!, $minOdds: Int!, $after: String) {
   so5 {
     so5Leaderboard(slug: $slug) {
       slug
       myFilteredBench(
         filters: {
-          positions: [BASEBALL_STARTING_PITCHER]
           starterOddsBasisPointsRange: { min: $minOdds }
           includeNoGame: false
           includeUsed: true
         }
         first: 50
+        after: $after
       ) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           anyPlayer { slug displayName }
