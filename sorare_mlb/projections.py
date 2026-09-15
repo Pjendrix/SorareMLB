@@ -30,12 +30,16 @@ class ProjectionEngine:
         self.injured_ids = injured_ids
         self.season = season or datetime.now().year
         self.hitter_positions = set(config.get_path("lineup.hitter_positions", []))
-        self._team_game: dict[int, dict] = {}
+        # Gameweek má 3–4 dny, takže tým hraje víckrát. Držet jen poslední
+        # zápas znamenalo, že se probable pitcher skoro nikdy netrefil.
+        self._team_games: dict[int, list[dict]] = {}
         for game in games:
             for side in ("home", "away"):
                 tid = game[side].get("id")
                 if tid:
-                    self._team_game[tid] = {**game, "side": side}
+                    self._team_games.setdefault(tid, []).append({**game, "side": side})
+        for entries in self._team_games.values():
+            entries.sort(key=lambda g: str(g.get("start") or ""))
 
     # ------------------------------------------------------------------ public
 
@@ -60,16 +64,13 @@ class ProjectionEngine:
         ):
             return self._unplayable(card, "na IL / restricted list")
 
-        game = self._team_game.get(mlb_player.get("team_id"))
-        if game is None and self.config.get_path("safety.require_scheduled_game", True):
+        team_games = self._team_games.get(mlb_player.get("team_id")) or []
+        if not team_games and self.config.get_path("safety.require_scheduled_game", True):
             return self._unplayable(card, "tým v tomto gameweeku nehraje")
 
-        is_pitcher = not self._is_hitter(card)
-        if is_pitcher:
-            proj = self._project_pitcher(card, scores, mlb_player, game)
-        else:
-            proj = self._project_hitter(card, scores, mlb_player, game)
-        return proj
+        if self._is_hitter(card):
+            return self._project_hitter(card, scores, mlb_player, team_games[0])
+        return self._project_pitcher(card, scores, mlb_player, team_games)
 
     # ------------------------------------------------------------------ hitters
 
@@ -110,22 +111,37 @@ class ProjectionEngine:
 
     # ------------------------------------------------------------------ pitchers
 
-    def _project_pitcher(self, card: Card, scores: list[float], player: dict, game: dict) -> Projection:
+    def _project_pitcher(
+        self, card: Card, scores: list[float], player: dict, team_games: list[dict]
+    ) -> Projection:
         from . import mlb
 
         weights = self.config.get_path("projection.pitcher", {})
         comp: dict[str, float] = {}
         notes: list[str] = []
+        is_sp = "BASEBALL_STARTING_PITCHER" in card.positions
+
+        # Startující nadhazovač boduje jen v zápase, který skutečně odstartuje.
+        game = None
+        if is_sp:
+            for candidate in team_games:
+                if candidate[candidate["side"]].get("probable_pitcher_id") == player["id"]:
+                    game = candidate
+                    break
+
+            if game is None:
+                if self.config.get_path("safety.require_probable_pitcher", True):
+                    return self._unplayable(
+                        card, "není ohlášený probable pitcher v tomto gameweeku"
+                    )
+                game = team_games[0]
+                notes.append("start neohlášen — projekce nejistá")
+            else:
+                notes.append("ohlášený start")
+        else:
+            game = team_games[0]
 
         base = self._form_base(scores, weights, comp, notes)
-
-        is_sp = "starting_pitcher" in card.positions
-        if is_sp:
-            probable_id = game[game["side"]].get("probable_pitcher_id")
-            if probable_id and probable_id != player["id"]:
-                return self._unplayable(card, "není ohlášený probable pitcher tohoto GW")
-            if not probable_id:
-                notes.append("probable pitcher zatím neohlášen — projekce nejistá")
 
         stats = mlb.pitcher_stats(player["id"], self.season)
         k_rate = stats.get("k_rate")

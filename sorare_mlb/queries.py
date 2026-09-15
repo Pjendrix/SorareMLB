@@ -63,6 +63,7 @@ query UpcomingLeaderboards {
       cutOffDate
       gameWeek
       mySo5LineupsCount
+      requiresManagerTeam
       myManagerTeams { id name }
       so5Fixture {
         slug

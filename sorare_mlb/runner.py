@@ -285,8 +285,14 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
     lineups = [_lineup_from_dict(d) for d in job.lineups]
     boards_by_slug = {b["slug"]: b["id"] for b in (job.leaderboards or [])}
+    # Každá sestava v jednom leaderboardu potřebuje vlastní manager team;
+    # Sorare jinak hlásí "This manager team already has a lineup".
     teams_by_slug = {
-        b["slug"]: ((b.get("myManagerTeams") or [{}])[0] or {}).get("id")
+        b["slug"]: [t["id"] for t in (b.get("myManagerTeams") or []) if t.get("id")]
+        for b in (job.leaderboards or [])
+    }
+    requires_team = {
+        b["slug"]: bool(b.get("requiresManagerTeam"))
         for b in (job.leaderboards or [])
     }
 
@@ -300,10 +306,14 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
                 raise SorareError(
                     f"Neznám ID leaderboardu pro {lineup.tournament_slug}."
                 )
+            teams = teams_by_slug.get(lineup.tournament_slug) or []
+            # index sestavy = index týmu; když tým chybí, necháme ho založit
+            team_id = teams[lineup.index] if lineup.index < len(teams) else None
             result = client.submit_lineup(
                 board_id,
                 lineup.card_slugs,
-                manager_team_id=teams_by_slug.get(lineup.tournament_slug),
+                manager_team_id=team_id,
+                requires_manager_team=requires_team.get(lineup.tournament_slug, False),
             )
             job.submitted.append(
                 {

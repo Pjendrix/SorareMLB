@@ -165,6 +165,7 @@ class SorareClient:
         leaderboard_id: str,
         card_slugs: list[str],
         manager_team_id: str | None = None,
+        requires_manager_team: bool = False,
     ) -> dict:
         """Odešle sestavu. Chce ID leaderboardu, ne slug.
 
@@ -180,9 +181,11 @@ class SorareClient:
             "so5LeaderboardId": leaderboard_id,
             "so5Appearances": appearances,
         }
+        # Hot Streak Champion manager team nepovoluje vůbec ("can't have more
+        # than 0"), Challenger ho naopak vyžaduje pro každou sestavu zvlášť.
         if manager_team_id:
             payload["managerTeamId"] = manager_team_id
-        else:
+        elif requires_manager_team:
             payload["shouldCreateManagerTeam"] = True
 
         body = self.execute(
