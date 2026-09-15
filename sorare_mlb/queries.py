@@ -66,6 +66,8 @@ query UpcomingLeaderboards {
         slug
         gameWeek
         sport
+        startDate
+        endDate
       }
     }
   }

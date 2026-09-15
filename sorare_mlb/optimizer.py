@@ -148,12 +148,25 @@ class LineupOptimizer:
 
         status = problem.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=time_limit))
         if pulp.LpStatus[status] != "Optimal":
+            # Bez rozpadu po slotech se infeasibilita ladí naslepo.
+            supply = []
+            for slot, allowed in self.slots.items():
+                fits = [
+                    c for c in self.cards
+                    if set(c.positions) & set(allowed)
+                    and self.projections[c.slug].floor >= min_floor
+                ]
+                needed = len(lineup_keys)
+                mark = "!" if len(fits) < needed else " "
+                supply.append(f"  {mark} {slot}: {len(fits)} karet / {needed} potřeba")
+
             raise OptimizationError(
                 f"Solver skončil se stavem {pulp.LpStatus[status]}. Nejčastější příčiny:\n"
                 "  • málo hrajících karet na požadovaný počet sestav → sniž `max_lineups`,\n"
                 f"  • `safety.min_projected_floor` ({min_floor}) vyřadil příliš mnoho karet,\n"
                 f"  • `stack.max_from_team` ({max_from_team}) blokuje sestavu, protože máš "
-                "karty jen z pár týmů."
+                "karty jen z pár týmů.\n\n"
+                "Nabídka po slotech (! = nedostatek):\n" + "\n".join(supply)
             )
 
         return self._extract(x, lineup_keys)

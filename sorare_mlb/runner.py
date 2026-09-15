@@ -185,7 +185,10 @@ def _step_scores(job: Job, config: Config, deadline: float) -> None:
 
 
 def _step_mlb(job: Job, config: Config, deadline: float) -> None:
-    start, end = mlb.gameweek_range()
+    # Okno musí vycházet z fixture, ne z dnešního data: gameweek začíná
+    # v budoucnu a podle kalendáře bychom počítali zápasy jiného týdne.
+    start, end = _fixture_window(job)
+    job.log_step(f"Okno gameweeku: {start} – {end}")
     games = mlb.schedule(start, end)
     team_ids = sorted(
         {g[s]["id"] for g in games for s in ("home", "away") if g[s].get("id")}
@@ -382,6 +385,29 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
                 )
             )
     return out
+
+
+def _fixture_window(job: Job) -> tuple:
+    """Rozsah dat gameweeku podle So5 fixture, s fallbackem na kalendář."""
+    from datetime import datetime
+
+    fixture = job.fixture or {}
+
+    def parse(value):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+
+    start = parse(fixture.get("startDate"))
+    end = parse(fixture.get("endDate"))
+    if start and end:
+        return start, end
+
+    job.log_step("Fixture nemá data, používám odhad podle kalendáře")
+    return mlb.gameweek_range()
 
 
 def _lineup_from_dict(raw: dict) -> Lineup:
