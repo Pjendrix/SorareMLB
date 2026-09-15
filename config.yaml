@@ -42,6 +42,9 @@ tournaments:
     risk_mode: safe        # safe = maximalizuje floor, upside = maximalizuje ceiling
     require_confirmed_lineup: true
     max_lineups: 1
+    # Hot Streak Champion je in-season soutěž: nejvýš jedna karta
+    # z předchozí sezóny. Vynechej klíč úplně, když turnaj neomezuje.
+    max_non_in_season: 1
   - name: Challenger
     slug_contains: challenger
     rarity: limited
@@ -79,7 +82,9 @@ stack:
 # Bezpečnostní pravidla.
 safety:
   # Karta se nepustí do Hot Streaks, pokud její odhadovaný floor je pod tímhle.
-  min_projected_floor: 12.0
+  # Pozor: MLB pálkaři mají obrovský rozptyl skóre, takže floor vychází nízko
+  # i u kvalitních hráčů. Nastav 0 pro vypnutí; nad ~8 začne prořezávat hodně.
+  min_projected_floor: 0.0
   # Vyloučit hráče na IL bez ohledu na projekci.
   exclude_injured: true
   # Vyloučit hráče, jejichž tým daný den nehraje.
