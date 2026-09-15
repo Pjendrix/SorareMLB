@@ -462,6 +462,42 @@ def debug(
     )
 
 
+@app.get("/api/starters")
+def starters(
+    request: Request,
+    slug: str | None = None,
+    min_odds: int = 5000,
+    secret: str | None = None,
+    x_internal_secret: str | None = Header(default=None),
+) -> JSONResponse:
+    """Kdo podle Sorare v tomhle gameweeku startuje.
+
+    Bez `slug` projde všechny otevřené baseballové leaderboardy, takže je
+    hned vidět, na kterém dotaz projde a na kterém ne.
+    """
+    _check_secret(x_internal_secret or secret, request)
+
+    from sorare_mlb.client import SorareClient
+
+    client = SorareClient(_config())
+    boards = client.fetch_leaderboards()
+    if slug:
+        boards = [b for b in boards if slug in b.get("slug", "")]
+
+    results = []
+    for board in boards[:8]:
+        found, error = client.fetch_probable_starters(board["slug"], min_odds)
+        results.append(
+            {
+                "leaderboard": board.get("slug"),
+                "count": len(found),
+                "players": sorted(found)[:40],
+                "error": error,
+            }
+        )
+    return JSONResponse({"min_odds": min_odds, "results": results})
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     required = ["SORARE_EMAIL", "SORARE_PASSWORD", "SORARE_API_KEY", "INTERNAL_SECRET"]
