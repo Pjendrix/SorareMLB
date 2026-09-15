@@ -241,6 +241,15 @@ def _step_optimize(job: Job, config: Config, deadline: float) -> None:
 
     job.lineups = [lu.to_dict() for lu in lineups]
     job.log_step(f"Sestaveno {len(lineups)} sestav")
+
+    # Nadhazovači jsou nejčastější zdroj překvapení — vypíšeme, proč byli vybráni.
+    for lineup in lineups:
+        for slot in lineup.slots:
+            if slot.slot != "SP":
+                continue
+            notes = projections[slot.card_slug].notes
+            job.log_step(f"  {lineup.tournament_name} #{lineup.index + 1} SP "
+                         f"{slot.player_name}: {'; '.join(notes) or '—'}")
     for skipped in optimizer.skipped:
         job.log_step(f"  vynecháno: {skipped} — nedostatek použitelných karet")
     job.state = "VALIDATE"

@@ -134,19 +134,33 @@ class ProjectionEngine:
                     break
 
             if game is not None:
-                notes.append("ohlášený start")
+                notes.append("ohlášený start (MLB)")
             elif announced and self.config.get_path("safety.require_probable_pitcher", True):
                 # Tým startéry ohlásil a tenhle mezi nimi není → nenastoupí.
                 return self._unplayable(card, "tým ohlásil jiné startéry")
             else:
-                # Nikdo ohlášený není (typicky pár dní před gameweekem),
-                # takže nemáme co soudit — kartu necháme s poznámkou.
                 game = team_games[0]
-                notes.append("startéři zatím neohlášeni")
         else:
             game = team_games[0]
 
         base = self._form_base(scores, weights, comp, notes)
+
+        # MLB ohlašuje startéry jen den dva dopředu. Sorare má vlastní projekci
+        # na celý gameweek ("PP" na kartě) — nadhazovač bez ní nemá start.
+        # Takového bereme jen jako nouzovku: silně penalizovaný, ne vyřazený.
+        if is_sp and game is not None and "ohlášený start (MLB)" not in notes:
+            projected = (card.sorare_projection or 0.0) > 0
+            if projected:
+                notes.append("projektovaný start (Sorare)")
+            else:
+                mult = float(
+                    self.config.get_path("safety.unprojected_pitcher_multiplier", 0.25)
+                )
+                if mult <= 0:
+                    return self._unplayable(card, "Sorare ho na tento gameweek neprojektuje")
+                base *= mult
+                comp["unprojected_mult"] = mult
+                notes.append("bez projektovaného startu — jen nouzovka")
 
         stats = mlb.pitcher_stats(player["id"], self.season)
         k_rate = stats.get("k_rate")

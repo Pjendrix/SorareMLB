@@ -66,6 +66,8 @@ class Card:
     # Karta se season bonusem (aktuální sezóna). In-season soutěže jich
     # vyžadují minimální počet.
     in_season: bool = True
+    # Sorare projekce na příští gameweek (None = Sorare hráče nečeká).
+    sorare_projection: float | None = None
 
     @property
     def positions(self) -> list[str]:

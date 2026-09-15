@@ -37,6 +37,9 @@ query UserBaseballCards($rarities: [Rarity!], $after: String) {
         anyPlayer {
           slug
           displayName
+          # Sorare projekce na příští gameweek. U SP je to zároveň příznak
+          # "projected pitcher" — nadhazovač bez startu má 0 nebo null.
+          nextClassicFixtureProjectedScore
           playerGameScores(last: 15) {
             score
             anyGame { date }

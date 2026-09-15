@@ -263,7 +263,15 @@ def card_from_dict(node: dict) -> Card:
         # `inSeasonEligible` neodpovídá season bonusu, jak ho počítá Sorare
         # při validaci sestavy — rozhoduje ročník karty.
         in_season=int(node.get("seasonYear") or 0) >= _current_season(),
+        sorare_projection=_as_float(raw.get("nextClassicFixtureProjectedScore")),
     )
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hash(slugs: list[str]) -> str:
