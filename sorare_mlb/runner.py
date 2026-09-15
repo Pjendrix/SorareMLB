@@ -199,6 +199,10 @@ def _step_mlb(job: Job, config: Config, deadline: float) -> None:
         "injured": sorted(mlb.injured_player_ids(team_ids)),
     }
     job.log_step(f"MLB: {len(games)} zápasů, {len(job.mlb_context['injured'])} hráčů na IL")
+    job.log_step(
+        f"MLB rosterů: {len(job.mlb_context['name_index'])} jmen, "
+        f"{len(team_ids)} týmů"
+    )
     job.state = "OPTIMIZE"
 
 
@@ -210,6 +214,24 @@ def _step_optimize(job: Job, config: Config, deadline: float) -> None:
         job.state = "DONE"
         job.log_step("Žádný turnaj k obsazení — sestavy už jsou nejspíš odeslané.")
         return
+
+    # Rozpad důvodů, proč karty vypadly — bez něj se infeasibilita ladí naslepo.
+    from collections import Counter
+
+    reasons = Counter(
+        p.reason_unplayable or "?" for p in projections.values() if not p.playable
+    )
+    playable = sum(1 for p in projections.values() if p.playable)
+    job.log_step(f"Použitelných karet: {playable} / {len(projections)}")
+    for reason, count in reasons.most_common(5):
+        job.log_step(f"  vyřazeno {count}× — {reason}")
+
+    # Ukázka konkrétních karet pomáhá poznat, jestli selhalo párování jmen.
+    sample = [
+        f"{c.player.name} ({c.player.team_name})"
+        for c in cards[:3]
+    ]
+    job.log_step("Vzorek karet: " + ", ".join(sample))
 
     optimizer = LineupOptimizer(config, cards, projections)
     try:
