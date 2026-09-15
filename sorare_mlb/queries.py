@@ -61,7 +61,6 @@ query UpcomingLeaderboards {
       rarityType
       cutOffDate
       gameWeek
-      canCompose
       mySo5LineupsCount
       so5Fixture {
         slug
