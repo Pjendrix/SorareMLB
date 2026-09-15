@@ -149,6 +149,33 @@ class SorareClient:
                 }
         return out
 
+    def fetch_probable_starters(self, leaderboard_slug: str, min_odds: int = 5000) -> set[str]:
+        """Slugy hráčů, které Sorare čeká jako startující nadhazovače.
+
+        Filtruje se přes lavičku daného leaderboardu, takže výsledek platí
+        pro ten gameweek — na rozdíl od `nextGame`, který ukazuje na nejbližší
+        zápas hráče, klidně mimo gameweek.
+
+        Prázdná množina znamená "nevím" (dotaz selhal); volající pak nesmí
+        nikoho penalizovat.
+        """
+        body = self.execute(
+            queries.PROBABLE_STARTERS,
+            {"slug": leaderboard_slug, "minOdds": min_odds},
+            operation_name="ProbableStarters",
+            tolerate_errors=True,
+        )
+        if body.get("errors"):
+            return set()
+
+        board = ((body.get("data") or {}).get("so5") or {}).get("so5Leaderboard") or {}
+        nodes = (board.get("myFilteredBench") or {}).get("nodes") or []
+        return {
+            (n.get("anyPlayer") or {}).get("slug")
+            for n in nodes
+            if (n.get("anyPlayer") or {}).get("slug")
+        }
+
     def fetch_leaderboards(self) -> list[dict]:
         """Otevřené baseballové leaderboardy — to, čemu v configu říkáme turnaje."""
         body = self.execute(queries.UPCOMING_LEADERBOARDS, operation_name="UpcomingLeaderboards")
@@ -264,21 +291,7 @@ def card_from_dict(node: dict) -> Card:
         # při validaci sestavy — rozhoduje ročník karty.
         in_season=int(node.get("seasonYear") or 0) >= _current_season(),
         sorare_projection=_as_float(raw.get("nextClassicFixtureProjectedScore")),
-        sorare_probable_starter=_probable_starter(raw),
     )
-
-
-def _probable_starter(raw: dict) -> bool | None:
-    """Je hráč mezi ohlášenými startéry svého příštího zápasu?
-
-    None znamená, že Sorare o příštím zápase nic nevrátilo — tehdy se
-    rozhoduje podle MLB StatsAPI.
-    """
-    game = raw.get("nextGame")
-    if not game or "probablePitchers" not in game:
-        return None
-    slugs = {p.get("slug") for p in (game.get("probablePitchers") or [])}
-    return raw.get("slug") in slugs
 
 
 def _as_float(value) -> float | None:

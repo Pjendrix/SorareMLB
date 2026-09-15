@@ -36,7 +36,8 @@ class ProjectionEngine:
         for game in games:
             for side in ("home", "away"):
                 tid = game[side].get("id")
-                if tid:
+                # Pozor na `if tid:` — ID 0 je platné a nula je nepravdivá.
+                if tid is not None:
                     self._team_games.setdefault(tid, []).append({**game, "side": side})
         for entries in self._team_games.values():
             entries.sort(key=lambda g: str(g.get("start") or ""))

@@ -56,6 +56,10 @@ class Job:
     submitted: list[dict] = field(default_factory=list)
     fixture: dict = field(default_factory=dict)
     leaderboards: list[dict] = field(default_factory=list)
+    # Slugy hráčů, které Sorare čeká jako startující nadhazovače tohoto GW.
+    probable_starters: list[str] = field(default_factory=list)
+    # Vrátil dotaz na startéry použitelná data? Když ne, nepenalizujeme.
+    starters_known: bool = False
 
     def log_step(self, text: str) -> None:
         self.steps.append(f"{datetime.now():%H:%M:%S} {text}")
@@ -175,6 +179,17 @@ def _step_cards(job: Job, config: Config, deadline: float) -> None:
     job.scores = client.fetch_scores(cards)
     job.pending_player_slugs = []
     job.log_step(f"Portfolio: {len(cards)} karet, {len(job.scores)} hráčů se skóre")
+
+    # Kdo v tomhle gameweeku startuje. Ptáme se lavičky konkrétního
+    # leaderboardu, jinak bychom dostali nejbližší zápas mimo gameweek.
+    if job.leaderboards:
+        starters = client.fetch_probable_starters(job.leaderboards[0]["slug"])
+        job.probable_starters = sorted(starters)
+        job.starters_known = bool(starters)
+        if starters:
+            job.log_step(f"Startující nadhazovači podle Sorare: {len(starters)}")
+        else:
+            job.log_step("Startéry se zjistit nepovedlo — nikoho nepenalizuji")
     job.state = "MLB"
 
 
@@ -191,7 +206,10 @@ def _step_mlb(job: Job, config: Config, deadline: float) -> None:
     job.log_step(f"Okno gameweeku: {start} – {end}")
     games = mlb.schedule(start, end)
     team_ids = sorted(
-        {g[s]["id"] for g in games for s in ("home", "away") if g[s].get("id")}
+        {
+            g[s]["id"] for g in games for s in ("home", "away")
+            if g[s].get("id") is not None
+        }
     )
     job.mlb_context = {
         "games": games,
@@ -385,6 +403,11 @@ def _rebuild(job: Job, config: Config) -> tuple[list[Card], dict[str, Projection
     """Z cache poskládá karty + projekce, aniž by znovu volal Sorare."""
     raw_cards = get_store().get_json(K_CARDS) or []
     cards = [card_from_dict(c) for c in raw_cards]
+
+    if job.starters_known:
+        starters = set(job.probable_starters)
+        for card in cards:
+            card.sorare_probable_starter = card.player.slug in starters
 
     ctx = job.mlb_context
     engine = ProjectionEngine(

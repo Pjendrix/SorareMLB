@@ -39,14 +39,6 @@ query UserBaseballCards($rarities: [Rarity!], $after: String) {
           displayName
           # Projekce skóre na příští gameweek (není to příznak startu!).
           nextClassicFixtureProjectedScore
-          # Tohle je zdroj odznaku "PP" na kartě: Sorare vede u zápasu
-          # vlastní seznam ohlášených startérů, a to dřív než MLB StatsAPI.
-          nextGame(so5FixtureEligible: true) {
-            ... on GameOfBaseball {
-              id
-              probablePitchers { slug }
-            }
-          }
           playerGameScores(last: 15) {
             score
             anyGame { date }
@@ -105,6 +97,37 @@ mutation CreateOrUpdateSo5Lineup($input: createOrUpdateSo5LineupInput!) {
   createOrUpdateSo5Lineup(input: $input) {
     so5Lineup { id }
     errors { message path }
+  }
+}
+"""
+
+
+# --------------------------------------------------------------------- lavička
+
+# Odznak "PP" na kartě = vysoká pravděpodobnost startu. Sorare ji nevystavuje
+# jako pole, ale dá se na ni filtrovat — a protože je lavička navázaná na
+# konkrétní leaderboard, sedí to na správný gameweek. (`nextGame` na hráči
+# vrací nejbližší zápas vůbec, což u vícedenního gameweeku ukazuje jinam.)
+PROBABLE_STARTERS = """
+query ProbableStarters($slug: String!, $minOdds: Int!) {
+  so5 {
+    so5Leaderboard(slug: $slug) {
+      slug
+      myFilteredBench(
+        filters: {
+          positions: [BASEBALL_STARTING_PITCHER]
+          starterOddsBasisPointsRange: { min: $minOdds }
+          includeNoGame: false
+          includeUsed: true
+        }
+        first: 50
+      ) {
+        nodes {
+          id
+          anyPlayer { slug displayName }
+        }
+      }
+    }
   }
 }
 """
