@@ -149,15 +149,18 @@ class SorareClient:
                 }
         return out
 
-    def fetch_probable_starters(self, leaderboard_slug: str, min_odds: int = 5000) -> set[str]:
+    def fetch_probable_starters(
+        self, leaderboard_slug: str, min_odds: int = 5000
+    ) -> tuple[set[str], str | None]:
         """Slugy hráčů, které Sorare čeká jako startující nadhazovače.
 
         Filtruje se přes lavičku daného leaderboardu, takže výsledek platí
         pro ten gameweek — na rozdíl od `nextGame`, který ukazuje na nejbližší
         zápas hráče, klidně mimo gameweek.
 
-        Prázdná množina znamená "nevím" (dotaz selhal); volající pak nesmí
-        nikoho penalizovat.
+        Vrací (slugy, chyba). Chybu vracíme ven a nepolykáme ji: když se
+        startéři nezjistí, musí to být vidět v logu, jinak se tiše postaví
+        sestava s nadhazovači, kteří nenastoupí.
         """
         body = self.execute(
             queries.PROBABLE_STARTERS,
@@ -166,15 +169,21 @@ class SorareClient:
             tolerate_errors=True,
         )
         if body.get("errors"):
-            return set()
+            return set(), "; ".join(
+                e.get("message", "?") for e in body["errors"]
+            )[:300]
 
         board = ((body.get("data") or {}).get("so5") or {}).get("so5Leaderboard") or {}
-        nodes = (board.get("myFilteredBench") or {}).get("nodes") or []
-        return {
+        bench = board.get("myFilteredBench")
+        if bench is None:
+            return set(), "myFilteredBench nevrátil nic"
+
+        slugs = {
             (n.get("anyPlayer") or {}).get("slug")
-            for n in nodes
+            for n in (bench.get("nodes") or [])
             if (n.get("anyPlayer") or {}).get("slug")
         }
+        return slugs, None if slugs else "žádný nadhazovač nad prahem startu"
 
     def fetch_leaderboards(self) -> list[dict]:
         """Otevřené baseballové leaderboardy — to, čemu v configu říkáme turnaje."""

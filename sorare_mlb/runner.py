@@ -183,13 +183,24 @@ def _step_cards(job: Job, config: Config, deadline: float) -> None:
     # Kdo v tomhle gameweeku startuje. Ptáme se lavičky konkrétního
     # leaderboardu, jinak bychom dostali nejbližší zápas mimo gameweek.
     if job.leaderboards:
-        starters = client.fetch_probable_starters(job.leaderboards[0]["slug"])
-        job.probable_starters = sorted(starters)
-        job.starters_known = bool(starters)
-        if starters:
-            job.log_step(f"Startující nadhazovači podle Sorare: {len(starters)}")
+        # Zkusíme leaderboardy, na které opravdu skládáme — první v seznamu
+        # může být turnaj, který vůbec nehrajeme.
+        for board in job.leaderboards:
+            starters, error = client.fetch_probable_starters(board["slug"])
+            if starters:
+                job.probable_starters = sorted(starters)
+                job.starters_known = True
+                job.log_step(
+                    f"Startující nadhazovači podle Sorare: {len(starters)} "
+                    f"(leaderboard {board['slug']})"
+                )
+                break
+            job.log_step(f"Startéři z {board['slug']}: {error}")
         else:
-            job.log_step("Startéry se zjistit nepovedlo — nikoho nepenalizuji")
+            job.log_step(
+                "VAROVÁNÍ: startéry se zjistit nepovedlo — nadhazovači se "
+                "vybírají jen podle formy a MLB probables"
+            )
     job.state = "MLB"
 
 

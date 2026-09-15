@@ -133,6 +133,29 @@ class LineupOptimizer:
                     )
                 problem += pulp.lpSum(vars_in_slot) == 1, f"slot_{li}_{slot}"
 
+        # 1b) Startující nadhazovači: dokud je k dispozici někdo s ohlášeným
+        # startem, nikdo jiný do SP slotu nesmí. Penalizace v projekci na tohle
+        # nestačila — silná forma ji dokázala přebít.
+        # Slot jen pro startující nadhazovače: všechny povolené pozice
+        # obsahují STARTING_PITCHER. Navázáno na název pozice, ne na
+        # pomocný seznam v configu, který nemusí být vyplněný.
+        sp_slots = [
+            slot for slot, allowed in self.slots.items()
+            if allowed and all("STARTING_PITCHER" in p.upper() for p in allowed)
+        ]
+        starters = {c.slug for c in self.cards if c.sorare_probable_starter is True}
+        if starters:
+            for slot in sp_slots:
+                if not any(
+                    c in starters
+                    for (c, l, s) in x
+                    if s == slot
+                ):
+                    continue  # na tenhle slot nikdo se startem není
+                for (c, l, s), var in x.items():
+                    if s == slot and c not in starters:
+                        problem += var == 0, f"needstart_{l}_{slot}_{_safe(c)}"
+
         # 2) karta nejvýš jednou celkově
         for card in self.cards:
             uses = [v for (c, l, s), v in x.items() if c == card.slug]
