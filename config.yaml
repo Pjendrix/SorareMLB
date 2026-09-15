@@ -88,6 +88,10 @@ safety:
   # Startující nadhazovač musí být ohlášený jako probable pitcher některého
   # zápasu v gameweeku. Bez toho hrozí, že vůbec nenastoupí = nula bodů.
   require_probable_pitcher: true
+  # SP, kterého Sorare na příští gameweek neprojektuje (chybí "PP" na kartě),
+  # dostane tenhle násobek projekce. Solver ho tak vezme jen jako nouzovku,
+  # když žádný projektovaný nadhazovač nezbyl. 0 = vyřadit úplně.
+  unprojected_pitcher_multiplier: 0.25
   # Vyloučit hráče na IL bez ohledu na projekci.
   exclude_injured: true
   # Vyloučit hráče, jejichž tým daný den nehraje.
