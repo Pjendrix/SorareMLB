@@ -145,6 +145,10 @@ běhů vůbec. Blokující kritéria jsou proto ta, která jsou dostupná vždyc
 Datum posledního zápasu se bere ze stejné odpovědi Sorare API jako skóre, takže
 filtr nestojí ani jedno volání navíc.
 
+Když na všechny požadované sestavy nestačí karty, ubírají se od nejnižší
+priority — Hot Streaks tedy nikdy nepadne kvůli tomu, že nevyjde třetí
+Challenger sestava, a naopak.
+
 Když validace najde blokující problém, **sestavy se neodešlou** ani v režimu
 `auto` — dostaneš notifikaci s návrhem náhrady. Oficiální lineup se použije,
 když náhodou k dispozici je, ale jen jako varování, nikdy jako důvod běh
@@ -172,7 +176,7 @@ Bez `KV_REST_API_*` se použije `.local-store.json`, takže Redis lokálně
 nepotřebuješ.
 
 ```bash
-pytest -q     # 37 testů (optimalizátor, pipeline, 2FA), žádná síť
+pytest -q     # 39 testů (optimalizátor, pipeline, 2FA), žádná síť
 ```
 
 ---
