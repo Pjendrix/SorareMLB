@@ -197,6 +197,38 @@ class SorareClient:
 
         return found, None if found else "nikdo nad prahem startu"
 
+    def fetch_bench(
+        self, leaderboard_slug: str, filters: dict, limit_pages: int = 6
+    ) -> tuple[list[dict], str | None]:
+        """Lavička leaderboardu s libovolnými filtry. Pro ladění i pro provoz."""
+        nodes: list[dict] = []
+        cursor: str | None = None
+
+        for _ in range(limit_pages):
+            body = self.execute(
+                queries.BENCH_PROBE,
+                {"slug": leaderboard_slug, "filters": filters, "after": cursor},
+                operation_name="BenchProbe",
+                tolerate_errors=True,
+            )
+            if body.get("errors"):
+                return [], "; ".join(
+                    e.get("message", "?") for e in body["errors"]
+                )[:300]
+
+            board = ((body.get("data") or {}).get("so5") or {}).get("so5Leaderboard") or {}
+            bench = board.get("myFilteredBench")
+            if bench is None:
+                return [], "myFilteredBench nevrátil nic"
+
+            nodes.extend(bench.get("nodes") or [])
+            page = bench.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            cursor = page.get("endCursor")
+
+        return nodes, None
+
     def fetch_leaderboards(self) -> list[dict]:
         """Otevřené baseballové leaderboardy — to, čemu v configu říkáme turnaje."""
         body = self.execute(queries.UPCOMING_LEADERBOARDS, operation_name="UpcomingLeaderboards")

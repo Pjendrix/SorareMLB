@@ -132,3 +132,24 @@ query ProbableStarters($slug: String!, $minOdds: Int!, $after: String) {
   }
 }
 """
+
+
+# Diagnostická varianta: filtry se předávají jako proměnná, takže jde
+# vyzkoušet, který z nich lavičku vyprázdní.
+BENCH_PROBE = """
+query BenchProbe($slug: String!, $filters: BenchFilterInput!, $after: String) {
+  so5 {
+    so5Leaderboard(slug: $slug) {
+      slug
+      myFilteredBench(filters: $filters, first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          position
+          anyPlayer { slug displayName }
+        }
+      }
+    }
+  }
+}
+"""
