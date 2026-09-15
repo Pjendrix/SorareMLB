@@ -266,40 +266,78 @@ def probe(
     spusť po každém delším výpadku, ideálně dřív než ti uteče gameweek.
     """
     _check_secret(x_internal_secret or secret, request)
+    import traceback
+
     from sorare_mlb.client import SorareClient
 
-    client = SorareClient(_config())
-    schema = client.introspect_root()
+    try:
+        client = SorareClient(_config())
+        schema = client.introspect_root()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc()[-1500:],
+            },
+            status_code=200,
+        )
+
     q = {f["name"] for f in (schema.get("queryType") or {}).get("fields", [])}
     m = {f["name"] for f in (schema.get("mutationType") or {}).get("fields", [])}
 
-    inputs = {}
-    for type_name in ("createBaseballLineupInput", "submitLineupInput"):
-        info = client.introspect_type(type_name)
-        if info:
-            inputs[type_name] = [f["name"] for f in (info.get("inputFields") or [])]
+    # Vytáhneme jen to, co potřebujeme — schéma má přes milion znaků.
+    def fields_of(type_name: str, contains: tuple[str, ...] = ()) -> list[str]:
+        try:
+            info = client.introspect_type(type_name)
+        except Exception as exc:  # noqa: BLE001
+            return [f"<chyba: {exc}>"]
+        if not info:
+            return ["<typ neexistuje>"]
+        names = [f["name"] for f in (info.get("fields") or [])]
+        if contains:
+            names = [
+                n for n in names
+                if any(c.lower() in n.lower() for c in contains)
+            ]
+        return sorted(names)
 
-    # Skutečná pole typů, na kterých dotazy stojí. Podle tohohle se
-    # queries.py opravuje.
-    types = {}
-    for type_name in (
-        "User", "BaseballCard", "BaseballPlayer", "Baseball",
-        "BaseballFixture", "BaseballCompetition",
-    ):
-        info = client.introspect_type(type_name)
-        if info:
-            types[type_name] = [f["name"] for f in (info.get("fields") or [])]
+    def input_fields_of(type_name: str) -> list[str]:
+        try:
+            info = client.introspect_type(type_name)
+        except Exception as exc:  # noqa: BLE001
+            return [f"<chyba: {exc}>"]
+        if not info:
+            return ["<typ neexistuje>"]
+        return sorted(f["name"] for f in (info.get("inputFields") or []))
+
+    relevant = ("baseball", "so5", "card", "fixture", "lineup", "competition")
+
+    inputs = {
+        name: input_fields_of(name)
+        for name in (
+            "So5LineupInput", "createOrUpdateSo5LineupInput",
+            "submitSo5LineupInput", "So5AppearanceInput", "AppearanceInput",
+            "createSo5LineupInput", "updateSo5LineupInput",
+        )
+    }
+
+    types = {
+        "Query": sorted(q),
+        "So5Root": fields_of("So5Root"),
+        "CurrentUser": fields_of("CurrentUser", relevant),
+        "So5Fixture": fields_of("So5Fixture"),
+        "So5Competition": fields_of("So5Competition"),
+        "So5Lineup": fields_of("So5Lineup"),
+        "Mutation": sorted(n for n in m if any(
+            c in n.lower() for c in ("lineup", "so5", "baseball")
+        )),
+    }
 
     return JSONResponse(
         {
-            "queries": {name: name in q for name in ("currentUser", "baseball", "baseballPlayers")},
-            "mutations": {
-                name: name in m
-                for name in ("createBaseballLineup", "submitLineup", "signIn")
-            },
             "input_fields": inputs,
             "types": types,
-            "hint": "Cokoli s false oprav v sorare_mlb/queries.py.",
+            "hint": "Pošli tenhle výstup celý — podle něj se opraví queries.py.",
         }
     )
 
