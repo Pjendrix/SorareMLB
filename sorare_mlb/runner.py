@@ -241,6 +241,8 @@ def _step_optimize(job: Job, config: Config, deadline: float) -> None:
 
     job.lineups = [lu.to_dict() for lu in lineups]
     job.log_step(f"Sestaveno {len(lineups)} sestav")
+    for skipped in optimizer.skipped:
+        job.log_step(f"  vynecháno: {skipped} — nedostatek použitelných karet")
     job.state = "VALIDATE"
 
 

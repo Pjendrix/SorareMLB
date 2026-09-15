@@ -124,20 +124,25 @@ class ProjectionEngine:
         # Startující nadhazovač boduje jen v zápase, který skutečně odstartuje.
         game = None
         if is_sp:
+            announced = 0
             for candidate in team_games:
-                if candidate[candidate["side"]].get("probable_pitcher_id") == player["id"]:
+                probable = candidate[candidate["side"]].get("probable_pitcher_id")
+                if probable:
+                    announced += 1
+                if probable == player["id"]:
                     game = candidate
                     break
 
-            if game is None:
-                if self.config.get_path("safety.require_probable_pitcher", True):
-                    return self._unplayable(
-                        card, "není ohlášený probable pitcher v tomto gameweeku"
-                    )
-                game = team_games[0]
-                notes.append("start neohlášen — projekce nejistá")
-            else:
+            if game is not None:
                 notes.append("ohlášený start")
+            elif announced and self.config.get_path("safety.require_probable_pitcher", True):
+                # Tým startéry ohlásil a tenhle mezi nimi není → nenastoupí.
+                return self._unplayable(card, "tým ohlásil jiné startéry")
+            else:
+                # Nikdo ohlášený není (typicky pár dní před gameweekem),
+                # takže nemáme co soudit — kartu necháme s poznámkou.
+                game = team_games[0]
+                notes.append("startéři zatím neohlášeni")
         else:
             game = team_games[0]
 

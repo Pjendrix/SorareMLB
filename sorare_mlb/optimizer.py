@@ -38,6 +38,8 @@ class LineupOptimizer:
         self.projections = projections
         self.slots: dict[str, list[str]] = config.get_path("lineup.slots", {})
         blacklist = set(config.get("blacklist_cards", []))
+        # Sestavy, které nešlo obsadit — runner je hlásí uživateli.
+        self.skipped: list[str] = []
 
         self.cards = [
             c
@@ -50,6 +52,13 @@ class LineupOptimizer:
     # ------------------------------------------------------------------ public
 
     def solve(self, tournaments: list[Tournament], time_limit: int = 60) -> list[Lineup]:
+        """Postaví co nejvíc sestav.
+
+        Když na všechny požadované sestavy nestačí karty, ubírá je od těch
+        nejméně důležitých, dokud řešení neexistuje. Dřív v takové situaci
+        spadl celý běh, takže kvůli chybějícímu SP do Hot Streaks nevznikly
+        ani Challenger sestavy.
+        """
         if not self.cards:
             raise OptimizationError(
                 "Žádná použitelná karta. Buď nikdo nehraje, nebo se nepovedlo "
@@ -64,6 +73,34 @@ class LineupOptimizer:
 
         if not lineup_keys:
             raise OptimizationError("Žádné turnaje k obsazení.")
+
+        # Ubíráme od nejnižší priority a od nejvyššího pořadí.
+        order = sorted(
+            range(len(lineup_keys)),
+            key=lambda i: (lineup_keys[i][0].weight, -lineup_keys[i][1]),
+        )
+        self.skipped = []
+        attempt = list(lineup_keys)
+        droppable = list(order)
+
+        last_error: OptimizationError | None = None
+        while attempt:
+            try:
+                return self._solve_for(attempt, time_limit)
+            except OptimizationError as exc:
+                last_error = exc
+                if len(attempt) == 1:
+                    break
+                victim_index = droppable.pop(0)
+                victim = lineup_keys[victim_index]
+                self.skipped.append(f"{victim[0].name} #{victim[1] + 1}")
+                attempt = [k for k in attempt if k is not victim]
+
+        raise last_error or OptimizationError("Sestavu nelze postavit.")
+
+    def _solve_for(
+        self, lineup_keys: list[tuple[Tournament, int]], time_limit: int
+    ) -> list[Lineup]:
 
         problem = pulp.LpProblem("sorare_mlb_lineups", pulp.LpMaximize)
         x: dict[tuple[str, int, str], pulp.LpVariable] = {}
@@ -86,12 +123,13 @@ class LineupOptimizer:
             )
 
         # 1) každý slot právě jednou
-        for li, _ in enumerate(lineup_keys):
+        for li, (tour, idx) in enumerate(lineup_keys):
             for slot in self.slots:
                 vars_in_slot = [v for (c, l, s), v in x.items() if l == li and s == slot]
                 if not vars_in_slot:
                     raise OptimizationError(
-                        f"Slot {slot} v sestavě #{li + 1} nelze obsadit — chybí hráč na pozici."
+                        f"{tour.name} #{idx + 1}: slot {slot} nelze obsadit — "
+                        "žádná karta na tu pozici."
                     )
                 problem += pulp.lpSum(vars_in_slot) == 1, f"slot_{li}_{slot}"
 
@@ -144,11 +182,6 @@ class LineupOptimizer:
                 continue
             fresh = {c.slug for c in self.cards if c.in_season}
             uses = [v for (c, l, s), v in x.items() if l == li and c in fresh]
-            if len(uses) < tour.min_in_season:
-                raise OptimizationError(
-                    f"{tour.name}: potřeba {tour.min_in_season} karet se season "
-                    f"bonusem, ale použitelných je jen {len(uses)}."
-                )
             problem += pulp.lpSum(uses) >= tour.min_in_season, f"inseason_{li}"
 
         # 6) floor pro bezpečné sestavy
