@@ -342,6 +342,71 @@ def probe(
     )
 
 
+@app.get("/api/schema")
+def schema_dump(
+    request: Request,
+    type: str = "Query",
+    grep: str | None = None,
+    secret: str | None = None,
+    x_internal_secret: str | None = Header(default=None),
+) -> JSONResponse:
+    """Vytáhne definici jednoho typu z veřejného SDL schématu Sorare.
+
+    Introspekce (__schema) je pro API klíče zakázaná, ale celé schéma je
+    ke stažení jako soubor. Stáhneme ho, najdeme blok `type <Name> {...}`
+    a vrátíme jen ten — jinak by odpověď měla přes milion znaků.
+
+    ?type=Query          definice typu
+    ?grep=lineup         jen řádky obsahující řetězec (case-insensitive)
+    """
+    _check_secret(x_internal_secret or secret, request)
+
+    import re
+
+    import requests
+
+    cached = get_store().get("sorare:sdl")
+    if not cached:
+        resp = requests.get("https://api.sorare.com/graphql/schema", timeout=60)
+        resp.raise_for_status()
+        cached = resp.text
+        # Schéma se mění zřídka; hodina stačí a ušetří opakované stahování.
+        try:
+            get_store().set("sorare:sdl", cached, ttl_seconds=3600)
+        except Exception:  # noqa: BLE001 — cache není kritická
+            pass
+
+    pattern = re.compile(
+        r"^(?:type|input|interface|enum)\s+" + re.escape(type) + r"\b[^\n]*\{",
+        re.MULTILINE,
+    )
+    match = pattern.search(cached)
+    if not match:
+        return JSONResponse({"type": type, "found": False})
+
+    # Najdeme konec bloku podle vyvážených složených závorek.
+    depth, i = 0, match.end() - 1
+    while i < len(cached):
+        if cached[i] == "{":
+            depth += 1
+        elif cached[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+
+    block = cached[match.start(): i + 1]
+    lines = [ln.rstrip() for ln in block.splitlines()]
+
+    if grep:
+        needle = grep.lower()
+        lines = [ln for ln in lines if needle in ln.lower()]
+
+    return JSONResponse(
+        {"type": type, "found": True, "lines": len(lines), "definition": lines}
+    )
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     required = ["SORARE_EMAIL", "SORARE_PASSWORD", "SORARE_API_KEY", "INTERNAL_SECRET"]
