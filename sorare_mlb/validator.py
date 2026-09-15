@@ -104,7 +104,7 @@ class LineupValidator:
                     continue
 
                 all_ids = {pid for ids in confirmed.values() for pid in ids}
-                is_pitcher = "pitcher" in " ".join(card.positions)
+                is_pitcher = "PITCHER" in " ".join(card.positions).upper()
                 if not is_pitcher and player["id"] not in all_ids:
                     # Varování, ne blocker: lineup mohl být zveřejněn jen částečně
                     # a zbytečné blokování by zabránilo odeslání úplně.

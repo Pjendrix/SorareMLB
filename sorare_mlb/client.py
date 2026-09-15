@@ -13,7 +13,7 @@ import requests
 from . import queries
 from .auth import Token, ensure_token
 from .models import Card, Config, Player, env
-from .store import K_CARDS, K_SCORES, get_store
+from .store import K_CARDS, get_store
 
 
 class SorareError(RuntimeError):
@@ -113,6 +113,7 @@ class SorareClient:
     # ------------------------------------------------------------------ data
 
     def fetch_cards(self, use_cache: bool = True) -> list[Card]:
+        """Karty i s posledními skóre — obojí přijde v jedné odpovědi."""
         if use_cache:
             cached = self.store.get_json(K_CARDS)
             if cached:
@@ -126,90 +127,68 @@ class SorareClient:
                 {"rarities": self.config.get("rarities", ["limited", "rare"]), "after": cursor},
                 operation_name="UserBaseballCards",
             )
-            block = ((body.get("data") or {}).get("currentUser") or {}).get("baseballCards") or {}
+            block = ((body.get("data") or {}).get("currentUser") or {}).get("cards") or {}
             nodes.extend(block.get("nodes") or [])
             page = block.get("pageInfo") or {}
             if not page.get("hasNextPage"):
                 break
             cursor = page.get("endCursor")
 
-        # Portfolio se mění zřídka — držíme ho 12 h, ať se pipeline nezdržuje.
-        self.store.set(K_CARDS, nodes, ttl_seconds=12 * 3600)
+        # Portfolio se mění zřídka, ale skóre ano — 2 h je rozumný kompromis.
+        self.store.set(K_CARDS, nodes, ttl_seconds=2 * 3600)
         return [card_from_dict(n) for n in nodes]
 
-    def fetch_scores_batch(self, slugs: list[str]) -> dict[str, dict]:
-        """Jedna dávka hráčů: skóre + datum posledního zápasu.
+    def fetch_scores(self, cards: list[Card]) -> dict[str, dict]:
+        """Skóre už máme z fetch_cards; tohle je jen přerovnání podle hráče."""
+        out: dict[str, dict] = {}
+        for card in cards:
+            if card.player.slug and card.player.slug not in out:
+                out[card.player.slug] = {
+                    "scores": card.recent_scores,
+                    "last_game": card.last_game,
+                }
+        return out
 
-        Datum bereme ze stejné odpovědi, takže filtr neaktivních hráčů
-        nestojí ani jedno volání navíc.
-        """
-        key = K_SCORES.format(batch=_hash(slugs))
-        cached = self.store.get_json(key)
-        if cached is not None:
-            return cached
-
-        body = self.execute(
-            queries.PLAYER_SCORES, {"slugs": slugs}, operation_name="PlayerScores"
-        )
-        chunk: dict[str, dict] = {}
-        for node in (body.get("data") or {}).get("baseballPlayers") or []:
-            stats = (node.get("gameStats") or {}).get("nodes") or []
-            played = [s for s in stats if s.get("score") is not None]
-            dates = [
-                (s.get("game") or {}).get("startDate")
-                for s in played
-                if (s.get("game") or {}).get("startDate")
-            ]
-            chunk[node["slug"]] = {
-                "scores": [float(s["score"]) for s in played],
-                "last_game": max(dates) if dates else None,
-            }
-
-        self.store.set(key, chunk, ttl_seconds=6 * 3600)
-        return chunk
-
-    def fetch_open_fixture(self) -> dict | None:
-        body = self.execute(queries.UPCOMING_FIXTURES, operation_name="UpcomingBaseballFixtures")
-        nodes = (((body.get("data") or {}).get("baseball") or {}).get("allFixtures") or {}).get(
-            "nodes"
-        ) or []
-        for node in nodes:
-            if str(node.get("state", "")).lower() in ("opened", "open", "upcoming"):
-                return node
-        return nodes[0] if nodes else None
-
-    def fetch_competitions(self, fixture_slug: str) -> list[dict]:
-        body = self.execute(
-            queries.FIXTURE_TOURNAMENTS,
-            {"fixtureSlug": fixture_slug},
-            operation_name="FixtureCompetitions",
-        )
-        fixture = ((body.get("data") or {}).get("baseball") or {}).get("fixture") or {}
-        return ((fixture.get("competitions") or {}).get("nodes")) or []
+    def fetch_leaderboards(self) -> list[dict]:
+        """Otevřené baseballové leaderboardy — to, čemu v configu říkáme turnaje."""
+        body = self.execute(queries.UPCOMING_LEADERBOARDS, operation_name="UpcomingLeaderboards")
+        boards = ((body.get("data") or {}).get("so5") or {}).get("upcomingLeaderboards") or []
+        return [
+            b for b in boards
+            if str(((b.get("so5Fixture") or {}).get("sport") or "")).upper() == "BASEBALL"
+        ]
 
     # ------------------------------------------------------------------ mutation
 
-    def submit_lineup(self, competition_slug: str, card_slugs: list[str]) -> dict:
-        variants = [
-            (queries.SUBMIT_LINEUP_PRIMARY, "CreateBaseballLineup", "createBaseballLineup"),
-            (queries.SUBMIT_LINEUP_FALLBACK, "SubmitLineup", "submitLineup"),
+    def submit_lineup(self, leaderboard_id: str, card_slugs: list[str]) -> dict:
+        """Odešle sestavu. Chce ID leaderboardu, ne slug.
+
+        `captain` je v So5AppearanceInput povinný; v MLB kapitána neřešíme,
+        takže posíláme false u všech.
+        """
+        appearances = [
+            {"cardSlug": slug, "captain": False, "index": i}
+            for i, slug in enumerate(card_slugs)
         ]
-        errors: list[str] = []
-        for mutation, op_name, field in variants:
-            body = self.execute(
-                mutation,
-                {"input": {"competitionSlug": competition_slug, "cardSlugs": card_slugs}},
-                operation_name=op_name,
-                tolerate_errors=True,
-            )
-            if body.get("errors"):
-                errors.append(str(body["errors"]))
-                continue
-            result = (body.get("data") or {}).get(field) or {}
-            if result.get("errors"):
-                raise SorareError(f"Sorare sestavu odmítl: {result['errors']}")
-            return result
-        raise SorareError("Submit mutace neprošla ani v jedné variantě: " + " | ".join(errors))
+        body = self.execute(
+            queries.SUBMIT_LINEUP,
+            {
+                "input": {
+                    "so5LeaderboardId": leaderboard_id,
+                    "so5Appearances": appearances,
+                }
+            },
+            operation_name="CreateOrUpdateSo5Lineup",
+            tolerate_errors=True,
+        )
+        if body.get("errors"):
+            raise SorareError(f"Sorare odmítlo mutaci: {body['errors']}")
+
+        result = (body.get("data") or {}).get("createOrUpdateSo5Lineup") or {}
+        if result.get("errors"):
+            messages = "; ".join(e.get("message", "?") for e in result["errors"])
+            raise SorareError(f"Sorare sestavu odmítl: {messages}")
+        return result
 
     # ------------------------------------------------------------------ probe
 
@@ -226,20 +205,36 @@ class SorareClient:
 
 
 def card_from_dict(node: dict) -> Card:
-    raw = node.get("player") or {}
-    team = raw.get("team") or {}
+    raw = node.get("anyPlayer") or {}
+    team = node.get("anyTeam") or {}
+
+    # Pozice chodí VELKÝMI písmeny (STARTING_PITCHER); držíme je tak,
+    # jak přijdou, a config.yaml je mapuje stejně.
+    positions = [str(p).upper() for p in (node.get("anyPositions") or [])]
+
+    scores, dates = [], []
+    for entry in raw.get("playerGameScores") or []:
+        if entry is None or entry.get("score") is None:
+            continue
+        scores.append(float(entry["score"]))
+        date = (entry.get("anyGame") or {}).get("date")
+        if date:
+            dates.append(date)
+
     player = Player(
         slug=raw.get("slug", ""),
         name=raw.get("displayName", "?"),
-        positions=[str(p).lower() for p in (raw.get("positions") or [])],
+        positions=positions,
         team_slug=team.get("slug"),
-        team_name=team.get("abbreviation") or team.get("name"),
+        team_name=team.get("name"),
     )
     return Card(
         slug=node.get("slug", ""),
-        rarity=str(node.get("rarity", "")).lower(),
+        rarity=str(node.get("rarityTyped", "")).lower(),
         season=node.get("seasonYear"),
         player=player,
+        recent_scores=scores,
+        last_game=max(dates) if dates else None,
     )
 
 

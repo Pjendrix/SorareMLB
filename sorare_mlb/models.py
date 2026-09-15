@@ -61,6 +61,8 @@ class Card:
     player: Player
     # Sorare skóre z minulosti, nejnovější první.
     recent_scores: list[float] = field(default_factory=list)
+    # Datum posledního odehraného zápasu (ISO) — vstup pro filtr neaktivity.
+    last_game: str | None = None
 
     @property
     def positions(self) -> list[str]:
@@ -106,6 +108,8 @@ class Tournament:
     max_lineups: int
     deadline: datetime | None = None
     allowed_rarities: list[str] = field(default_factory=list)
+    # Mutace chce ID leaderboardu, ne slug.
+    leaderboard_id: str | None = None
 
 
 @dataclass

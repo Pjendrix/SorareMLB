@@ -55,6 +55,7 @@ class Job:
     issues: list[dict] = field(default_factory=list)
     submitted: list[dict] = field(default_factory=list)
     fixture: dict = field(default_factory=dict)
+    leaderboards: list[dict] = field(default_factory=list)
 
     def log_step(self, text: str) -> None:
         self.steps.append(f"{datetime.now():%H:%M:%S} {text}")
@@ -153,33 +154,34 @@ def _self_invoke(job_id: str) -> None:
 
 def _step_queued(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
-    fixture = client.fetch_open_fixture()
-    if not fixture:
-        raise SorareError("Nenašel jsem otevřený fixture — nejspíš jsme mezi gameweeky.")
+    boards = client.fetch_leaderboards()
+    if not boards:
+        raise SorareError(
+            "Žádný otevřený baseballový leaderboard — nejspíš jsme mezi gameweeky."
+        )
+    job.leaderboards = boards
+    fixture = (boards[0].get("so5Fixture") or {})
     job.fixture = fixture
-    job.log_step(f"Fixture: {fixture.get('displayName') or fixture.get('slug')}")
+    job.log_step(
+        f"Gameweek {fixture.get('gameWeek', '?')}: {len(boards)} otevřených leaderboardů"
+    )
     job.state = "CARDS"
 
 
 def _step_cards(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
     cards = client.fetch_cards()
-    job.pending_player_slugs = sorted({c.player.slug for c in cards if c.player.slug})
-    job.log_step(f"Portfolio: {len(cards)} karet, {len(job.pending_player_slugs)} hráčů")
-    job.state = "SCORES"
+    # Skóre chodí ve stejné odpovědi jako karty, takže samostatný krok odpadá.
+    job.scores = client.fetch_scores(cards)
+    job.pending_player_slugs = []
+    job.log_step(f"Portfolio: {len(cards)} karet, {len(job.scores)} hráčů se skóre")
+    job.state = "MLB"
 
 
 def _step_scores(job: Job, config: Config, deadline: float) -> None:
-    client = SorareClient(config)
-    while job.pending_player_slugs and time.monotonic() < deadline:
-        batch = job.pending_player_slugs[:SCORE_BATCH]
-        job.scores.update(client.fetch_scores_batch(batch))
-        job.pending_player_slugs = job.pending_player_slugs[SCORE_BATCH:]
-        save(job)
-
-    if not job.pending_player_slugs:
-        job.log_step(f"Skóre stažena pro {len(job.scores)} hráčů")
-        job.state = "MLB"
+    # Skóre se stahují spolu s kartami; tenhle stav zůstává jen proto, aby
+    # joby rozpracované starší verzí nezůstaly viset.
+    job.state = "MLB"
 
 
 def _step_mlb(job: Job, config: Config, deadline: float) -> None:
@@ -257,20 +259,26 @@ def _step_validate(job: Job, config: Config, deadline: float) -> None:
 def _step_submit(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
     lineups = [_lineup_from_dict(d) for d in job.lineups]
+    boards_by_slug = {b["slug"]: b["id"] for b in (job.leaderboards or [])}
 
     already = {(s["tournament_slug"], s.get("index", 0)) for s in job.submitted if s.get("ok")}
     for lineup in lineups:
         if (lineup.tournament_slug, lineup.index) in already:
             continue
         try:
-            result = client.submit_lineup(lineup.tournament_slug, lineup.card_slugs)
+            board_id = boards_by_slug.get(lineup.tournament_slug)
+            if not board_id:
+                raise SorareError(
+                    f"Neznám ID leaderboardu pro {lineup.tournament_slug}."
+                )
+            result = client.submit_lineup(board_id, lineup.card_slugs)
             job.submitted.append(
                 {
                     "tournament_slug": lineup.tournament_slug,
                     "tournament_name": lineup.tournament_name,
                     "index": lineup.index,
                     "ok": True,
-                    "lineup_id": (result.get("lineup") or {}).get("id"),
+                    "lineup_id": (result.get("so5Lineup") or {}).get("id"),
                 }
             )
             job.log_step(f"Odesláno: {lineup.tournament_name}")
@@ -338,30 +346,40 @@ def _rebuild(job: Job, config: Config) -> tuple[list[Card], dict[str, Projection
 
 
 def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournament]:
-    available = client.fetch_competitions(job.fixture["slug"])
+    """Spáruje leaderboardy ze Sorare s turnaji z configu."""
+    available = job.leaderboards or client.fetch_leaderboards()
     out: list[Tournament] = []
+
     for spec in config.get("tournaments", []):
         needle = str(spec.get("slug_contains", "")).lower()
-        match = next((c for c in available if needle in str(c.get("slug", "")).lower()), None)
-        if not match:
+        matches = [
+            b for b in available
+            if needle in str(b.get("slug", "")).lower()
+            or needle in str(b.get("displayName", "")).lower()
+        ]
+        if not matches:
             job.log_step(f"Turnaj '{spec['name']}' nenalezen — přeskakuji")
             continue
-        already = int(match.get("lineupsCount") or 0)
-        cap = int(match.get("maxLineups") or spec.get("max_lineups", 1))
-        remaining = max(0, min(int(spec.get("max_lineups", 1)), cap - already))
-        if remaining == 0:
-            job.log_step(f"{spec['name']}: už odesláno, přeskakuji")
-            continue
-        out.append(
-            Tournament(
-                slug=match["slug"],
-                name=spec["name"],
-                weight=float(spec.get("weight", 1.0)),
-                risk_mode=spec.get("risk_mode", "upside"),
-                require_confirmed_lineup=bool(spec.get("require_confirmed_lineup", False)),
-                max_lineups=remaining,
+
+        for board in matches:
+            already = int(board.get("mySo5LineupsCount") or 0)
+            wanted = int(spec.get("max_lineups", 1))
+            remaining = max(0, wanted - already)
+            if remaining == 0:
+                job.log_step(f"{spec['name']} ({board['slug']}): už odesláno")
+                continue
+
+            out.append(
+                Tournament(
+                    slug=board["slug"],
+                    name=spec["name"],
+                    weight=float(spec.get("weight", 1.0)),
+                    risk_mode=spec.get("risk_mode", "upside"),
+                    require_confirmed_lineup=bool(spec.get("require_confirmed_lineup", False)),
+                    max_lineups=remaining,
+                    leaderboard_id=board["id"],
+                )
             )
-        )
     return out
 
 

@@ -1,34 +1,44 @@
-"""Všechny GraphQL dotazy a mutace na jednom místě.
+"""GraphQL dotazy a mutace pro Sorare MLB.
 
-Sorare své schéma průběžně mění a baseballová část je hůř zdokumentovaná než
-fotbalová. Proto:
+Ověřeno proti oficiálnímu SDL (https://api.sorare.com/graphql/schema).
+Zásadní věci, které se liší od intuice:
 
-* každý dotaz má v komentáři, co od něj čekáme,
-* `probe` v CLI pustí introspekci a řekne ti, která pole už neexistují,
-* klient umí u nepodstatných polí degradovat (viz client.py).
+* Neexistuje kořen `baseball`. MLB sdílí So5 systém s fotbalem a odlišuje se
+  argumentem `sport: BASEBALL`.
+* Karty se berou přes `currentUser.cards(sport: BASEBALL)`, ne přes
+  `baseballCards` na Query.
+* „Turnaje" jsou So5Leaderboardy (`so5.upcomingLeaderboards`), ne competitions.
+* Sestava se odesílá mutací `createOrUpdateSo5Lineup`, která chce **ID**
+  leaderboardu (ne slug) a pole `So5AppearanceInput` s povinným `captain`.
+* Pozice jsou VELKÝMI písmeny: STARTING_PITCHER, FIRST_BASE, …
 
-Když ti `probe` nahlásí rozdíl, uprav dotaz **jen tady**.
+Introspekce (`__schema`) je pro API klíče zakázaná, takže schéma se ověřuje
+endpointem /api/schema, který stahuje veřejné SDL.
 """
 
 # --------------------------------------------------------------------- portfolio
 
+# Skóre tahám rovnou s kartami — ušetří to samostatný dotaz na hráče
+# a hlavně nepotřebuju kořenový dotaz na hráče podle slugu.
 USER_CARDS = """
 query UserBaseballCards($rarities: [Rarity!], $after: String) {
   currentUser {
     slug
     nickname
-    baseballCards(rarities: $rarities, first: 50, after: $after) {
+    cards(sport: BASEBALL, rarities: $rarities, first: 20, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
         slug
-        rarity
+        rarityTyped
         seasonYear
-        player: anyPlayer {
+        anyPositions
+        anyTeam { slug name }
+        anyPlayer {
           slug
           displayName
-          positions
-          team: activeClub {
-            ... on BaseballTeam { slug name abbreviation }
+          playerGameScores(last: 15) {
+            score
+            anyGame { date }
           }
         }
       }
@@ -37,59 +47,26 @@ query UserBaseballCards($rarities: [Rarity!], $after: String) {
 }
 """
 
-# Posledních N Sorare skóre hráče. Tohle je hlavní vstup projekce.
-PLAYER_SCORES = """
-query PlayerScores($slugs: [String!]!) {
-  baseballPlayers(slugs: $slugs) {
-    slug
-    displayName
-    positions
-    lastFifteenSoFiveScore: lastFifteenScore
-    gameStats: baseballGameStats(last: 15) {
-      nodes {
-        score
-        game { id startDate }
-      }
-    }
-  }
-}
-"""
+# --------------------------------------------------------------------- turnaje
 
-# --------------------------------------------------------------------- fixtures
-
-UPCOMING_FIXTURES = """
-query UpcomingBaseballFixtures {
-  baseball {
-    allFixtures(first: 4) {
-      nodes {
-        slug
-        displayName
-        state
-        startDate
-        endDate
-        gameWeek
-      }
-    }
-  }
-}
-"""
-
-FIXTURE_TOURNAMENTS = """
-query FixtureCompetitions($fixtureSlug: String!) {
-  baseball {
-    fixture(slug: $fixtureSlug) {
+# upcomingLeaderboards vrací otevřené leaderboardy napříč sporty, proto se
+# filtruje podle so5Fixture.sport na naší straně.
+UPCOMING_LEADERBOARDS = """
+query UpcomingLeaderboards {
+  so5 {
+    upcomingLeaderboards {
+      id
       slug
-      startDate
-      endDate
-      competitions {
-        nodes {
-          slug
-          displayName
-          rarityType
-          lineupsCount
-          maxLineups
-          submissionDeadline: closesAt
-        }
+      displayName
+      rarityType
+      cutOffDate
+      gameWeek
+      canCompose
+      mySo5LineupsCount
+      so5Fixture {
+        slug
+        gameWeek
+        sport
       }
     }
   }
@@ -97,59 +74,23 @@ query FixtureCompetitions($fixtureSlug: String!) {
 """
 
 MY_LINEUPS = """
-query MyLineups($fixtureSlug: String!) {
-  currentUser {
-    baseballLineups(fixtureSlug: $fixtureSlug) {
-      nodes {
-        id
-        competition { slug displayName }
-        cards { slug }
-      }
+query MyLineups {
+  so5 {
+    myOngoingAndRecentSo5Lineups {
+      id
+      so5Leaderboard { slug displayName }
     }
   }
 }
 """
 
-# --------------------------------------------------------------------- mutations
+# --------------------------------------------------------------------- mutace
 
-# Sorare pojmenovává tuhle mutaci v baseballu jinak než ve fotbale a měnil ji.
-# Držíme dvě varianty a klient zkusí druhou, když první neprojde validací schématu.
-SUBMIT_LINEUP_PRIMARY = """
-mutation CreateBaseballLineup($input: createBaseballLineupInput!) {
-  createBaseballLineup(input: $input) {
-    lineup { id }
+SUBMIT_LINEUP = """
+mutation CreateOrUpdateSo5Lineup($input: createOrUpdateSo5LineupInput!) {
+  createOrUpdateSo5Lineup(input: $input) {
+    so5Lineup { id }
     errors { message path }
-  }
-}
-"""
-
-SUBMIT_LINEUP_FALLBACK = """
-mutation SubmitLineup($input: submitLineupInput!) {
-  submitLineup(input: $input) {
-    lineup { id }
-    errors { message path }
-  }
-}
-"""
-
-# --------------------------------------------------------------------- introspection
-
-INTROSPECT_TYPE = """
-query IntrospectType($name: String!) {
-  __type(name: $name) {
-    name
-    kind
-    fields { name description }
-    inputFields { name type { name kind ofType { name kind } } }
-  }
-}
-"""
-
-INTROSPECT_ROOT = """
-query IntrospectRoot {
-  __schema {
-    queryType { fields { name } }
-    mutationType { fields { name } }
   }
 }
 """
