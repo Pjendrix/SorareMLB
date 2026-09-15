@@ -404,6 +404,7 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
                     require_confirmed_lineup=bool(spec.get("require_confirmed_lineup", False)),
                     max_lineups=remaining,
                     leaderboard_id=board["id"],
+                    max_non_in_season=spec.get("max_non_in_season"),
                 )
             )
     return out

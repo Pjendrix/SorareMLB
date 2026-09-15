@@ -235,6 +235,7 @@ def card_from_dict(node: dict) -> Card:
         player=player,
         recent_scores=scores,
         last_game=max(dates) if dates else None,
+        in_season=bool(node.get("inSeasonEligible", True)),
     )
 
 

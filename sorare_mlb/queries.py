@@ -31,6 +31,7 @@ query UserBaseballCards($rarities: [Rarity!], $after: String) {
         slug
         rarityTyped
         seasonYear
+        inSeasonEligible
         anyPositions
         anyTeam { slug name }
         anyPlayer {

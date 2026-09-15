@@ -117,6 +117,18 @@ class LineupOptimizer:
                 if len(uses) > max_from_team:
                     problem += pulp.lpSum(uses) <= max_from_team, f"team_{li}_{_safe(team)}"
 
+        # 5b) in-season limit (Hot Streak Champion povolí jednu kartu mimo sezónu)
+        for li, (tour, _) in enumerate(lineup_keys):
+            if tour.max_non_in_season is None:
+                continue
+            old_season = {c.slug for c in self.cards if not c.in_season}
+            uses = [v for (c, l, s), v in x.items() if l == li and c in old_season]
+            if uses:
+                problem += (
+                    pulp.lpSum(uses) <= tour.max_non_in_season,
+                    f"inseason_{li}",
+                )
+
         # 6) floor pro bezpečné sestavy
         min_floor = float(self.config.get_path("safety.min_projected_floor", 0))
         if min_floor > 0:
@@ -150,15 +162,16 @@ class LineupOptimizer:
         if pulp.LpStatus[status] != "Optimal":
             # Bez rozpadu po slotech se infeasibilita ladí naslepo.
             supply = []
+            needed = len(lineup_keys)
             for slot, allowed in self.slots.items():
-                fits = [
-                    c for c in self.cards
-                    if set(c.positions) & set(allowed)
-                    and self.projections[c.slug].floor >= min_floor
-                ]
-                needed = len(lineup_keys)
+                fits = [c for c in self.cards if set(c.positions) & set(allowed)]
+                # Práh na floor platí jen pro "safe" turnaje, ne pro všechny.
+                above = [c for c in fits if self.projections[c.slug].floor >= min_floor]
                 mark = "!" if len(fits) < needed else " "
-                supply.append(f"  {mark} {slot}: {len(fits)} karet / {needed} potřeba")
+                detail = f"  {mark} {slot}: {len(fits)} karet / {needed} potřeba"
+                if min_floor > 0 and len(above) < needed:
+                    detail += f" (z toho {len(above)} nad floor {min_floor})"
+                supply.append(detail)
 
             raise OptimizationError(
                 f"Solver skončil se stavem {pulp.LpStatus[status]}. Nejčastější příčiny:\n"

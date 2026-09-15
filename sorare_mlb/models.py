@@ -63,6 +63,9 @@ class Card:
     recent_scores: list[float] = field(default_factory=list)
     # Datum posledního odehraného zápasu (ISO) — vstup pro filtr neaktivity.
     last_game: str | None = None
+    # In-season soutěže (Hot Streak Champion) povolují jen omezený počet
+    # karet z předchozích sezón.
+    in_season: bool = True
 
     @property
     def positions(self) -> list[str]:
@@ -110,6 +113,9 @@ class Tournament:
     allowed_rarities: list[str] = field(default_factory=list)
     # Mutace chce ID leaderboardu, ne slug.
     leaderboard_id: str | None = None
+    # Kolik karet mimo aktuální sezónu smí sestava obsahovat.
+    # None = bez omezení (Challenger), 1 = in-season soutěže.
+    max_non_in_season: int | None = None
 
 
 @dataclass

@@ -33,11 +33,16 @@ def _get(path: str, **params) -> dict:
     return resp.json()
 
 
+# Přípony, které Sorare a MLB uvádějí nekonzistentně.
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
 def normalize_name(name: str) -> str:
     text = unicodedata.normalize("NFKD", name)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = re.sub(r"[^a-z ]", "", text.lower())
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"[^a-z ]", " ", text.lower())
+    parts = [p for p in text.split() if p and p not in _NAME_SUFFIXES]
+    return " ".join(parts)
 
 
 # ------------------------------------------------------------------ schedule
