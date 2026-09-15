@@ -285,6 +285,10 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
     lineups = [_lineup_from_dict(d) for d in job.lineups]
     boards_by_slug = {b["slug"]: b["id"] for b in (job.leaderboards or [])}
+    teams_by_slug = {
+        b["slug"]: ((b.get("myManagerTeams") or [{}])[0] or {}).get("id")
+        for b in (job.leaderboards or [])
+    }
 
     already = {(s["tournament_slug"], s.get("index", 0)) for s in job.submitted if s.get("ok")}
     for lineup in lineups:
@@ -296,7 +300,11 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
                 raise SorareError(
                     f"Neznám ID leaderboardu pro {lineup.tournament_slug}."
                 )
-            result = client.submit_lineup(board_id, lineup.card_slugs)
+            result = client.submit_lineup(
+                board_id,
+                lineup.card_slugs,
+                manager_team_id=teams_by_slug.get(lineup.tournament_slug),
+            )
             job.submitted.append(
                 {
                     "tournament_slug": lineup.tournament_slug,
@@ -404,7 +412,7 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
                     require_confirmed_lineup=bool(spec.get("require_confirmed_lineup", False)),
                     max_lineups=remaining,
                     leaderboard_id=board["id"],
-                    max_non_in_season=spec.get("max_non_in_season"),
+                    min_in_season=spec.get("min_in_season"),
                 )
             )
     return out

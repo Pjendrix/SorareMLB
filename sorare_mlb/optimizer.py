@@ -101,6 +101,25 @@ class LineupOptimizer:
             if uses:
                 problem += pulp.lpSum(uses) <= 1, f"unique_{_safe(card.slug)}"
 
+        # 2b) jeden hráč jen jednou v rámci jedné sestavy.
+        # Sorare tohle odmítá ("One player can only appear once") a portfolio
+        # běžně obsahuje víc karet téhož hráče.
+        by_player: dict[str, list[str]] = defaultdict(list)
+        for card in self.cards:
+            if card.player.slug:
+                by_player[card.player.slug].append(card.slug)
+
+        for li, _ in enumerate(lineup_keys):
+            for player_slug, slugs in by_player.items():
+                if len(slugs) < 2:
+                    continue
+                uses = [v for (c, l, s), v in x.items() if l == li and c in set(slugs)]
+                if len(uses) > 1:
+                    problem += (
+                        pulp.lpSum(uses) <= 1,
+                        f"oneplayer_{li}_{_safe(player_slug)}",
+                    )
+
         # 5) limit hráčů z jednoho týmu
         max_from_team = int(self.config.get_path("stack.max_from_team", 4))
         by_team: dict[str, list[Card]] = defaultdict(list)
@@ -117,17 +136,20 @@ class LineupOptimizer:
                 if len(uses) > max_from_team:
                     problem += pulp.lpSum(uses) <= max_from_team, f"team_{li}_{_safe(team)}"
 
-        # 5b) in-season limit (Hot Streak Champion povolí jednu kartu mimo sezónu)
+        # 5b) in-season minimum.
+        # Sorare to hlásí jako "minimum required is 6" — vyjadřuje se to jako
+        # dolní mez na karty se season bonusem, ne jako strop na ty staré.
         for li, (tour, _) in enumerate(lineup_keys):
-            if tour.max_non_in_season is None:
+            if tour.min_in_season is None:
                 continue
-            old_season = {c.slug for c in self.cards if not c.in_season}
-            uses = [v for (c, l, s), v in x.items() if l == li and c in old_season]
-            if uses:
-                problem += (
-                    pulp.lpSum(uses) <= tour.max_non_in_season,
-                    f"inseason_{li}",
+            fresh = {c.slug for c in self.cards if c.in_season}
+            uses = [v for (c, l, s), v in x.items() if l == li and c in fresh]
+            if len(uses) < tour.min_in_season:
+                raise OptimizationError(
+                    f"{tour.name}: potřeba {tour.min_in_season} karet se season "
+                    f"bonusem, ale použitelných je jen {len(uses)}."
                 )
+            problem += pulp.lpSum(uses) >= tour.min_in_season, f"inseason_{li}"
 
         # 6) floor pro bezpečné sestavy
         min_floor = float(self.config.get_path("safety.min_projected_floor", 0))

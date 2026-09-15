@@ -160,24 +160,34 @@ class SorareClient:
 
     # ------------------------------------------------------------------ mutation
 
-    def submit_lineup(self, leaderboard_id: str, card_slugs: list[str]) -> dict:
+    def submit_lineup(
+        self,
+        leaderboard_id: str,
+        card_slugs: list[str],
+        manager_team_id: str | None = None,
+    ) -> dict:
         """Odešle sestavu. Chce ID leaderboardu, ne slug.
 
         `captain` je v So5AppearanceInput povinný; v MLB kapitána neřešíme,
-        takže posíláme false u všech.
+        takže posíláme false u všech. Některé soutěže (Challenger) vyžadují
+        manager team — když ho uživatel nemá, necháme ho Sorare založit.
         """
         appearances = [
             {"cardSlug": slug, "captain": False, "index": i}
             for i, slug in enumerate(card_slugs)
         ]
+        payload: dict = {
+            "so5LeaderboardId": leaderboard_id,
+            "so5Appearances": appearances,
+        }
+        if manager_team_id:
+            payload["managerTeamId"] = manager_team_id
+        else:
+            payload["shouldCreateManagerTeam"] = True
+
         body = self.execute(
             queries.SUBMIT_LINEUP,
-            {
-                "input": {
-                    "so5LeaderboardId": leaderboard_id,
-                    "so5Appearances": appearances,
-                }
-            },
+            {"input": payload},
             operation_name="CreateOrUpdateSo5Lineup",
             tolerate_errors=True,
         )
@@ -202,6 +212,18 @@ class SorareClient:
             operation_name="IntrospectType", tolerate_errors=True,
         )
         return (body.get("data") or {}).get("__type")
+
+
+def _current_season() -> int:
+    """Sezóna, která právě dává season bonus.
+
+    MLB sezóna se kryje s kalendářním rokem, takže stačí rok — a v lednu
+    a únoru, kdy se ještě nehraje, platí ta předchozí.
+    """
+    from datetime import date
+
+    today = date.today()
+    return today.year if today.month >= 3 else today.year - 1
 
 
 def card_from_dict(node: dict) -> Card:
@@ -235,7 +257,9 @@ def card_from_dict(node: dict) -> Card:
         player=player,
         recent_scores=scores,
         last_game=max(dates) if dates else None,
-        in_season=bool(node.get("inSeasonEligible", True)),
+        # `inSeasonEligible` neodpovídá season bonusu, jak ho počítá Sorare
+        # při validaci sestavy — rozhoduje ročník karty.
+        in_season=int(node.get("seasonYear") or 0) >= _current_season(),
     )
 
 
