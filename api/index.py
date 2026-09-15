@@ -407,6 +407,61 @@ def schema_dump(
     )
 
 
+@app.get("/api/debug")
+def debug(
+    request: Request,
+    secret: str | None = None,
+    x_internal_secret: str | None = Header(default=None),
+) -> JSONResponse:
+    """Co reálně chodí ze Sorare — slugy leaderboardů a hodnoty pozic.
+
+    Podle tohohle se nastavuje `tournaments.slug_contains` a `lineup.slots`
+    v config.yaml. Čte z cache, takže nestahuje portfolio znovu.
+    """
+    _check_secret(x_internal_secret or secret, request)
+
+    from collections import Counter
+
+    from sorare_mlb.client import SorareClient, card_from_dict
+    from sorare_mlb.store import K_CARDS
+
+    config = _config()
+    client = SorareClient(config)
+
+    boards = client.fetch_leaderboards()
+    raw_cards = get_store().get_json(K_CARDS) or []
+    cards = [card_from_dict(c) for c in raw_cards]
+
+    positions = Counter(pos for c in cards for pos in c.positions)
+    configured = {
+        p for allowed in config.get_path("lineup.slots", {}).values() for p in allowed
+    }
+    seen = set(positions)
+
+    return JSONResponse(
+        {
+            "leaderboards": sorted(
+                (
+                    {
+                        "id": b.get("id"),
+                        "slug": b.get("slug"),
+                        "name": b.get("displayName"),
+                        "rarity": b.get("rarityType"),
+                        "mine": b.get("mySo5LineupsCount"),
+                    }
+                    for b in boards
+                ),
+                key=lambda b: str(b["slug"]),
+            ),
+            "cards_cached": len(cards),
+            "positions_seen": dict(positions.most_common()),
+            "positions_in_config_but_unseen": sorted(configured - seen),
+            "positions_seen_but_not_in_config": sorted(seen - configured),
+            "rarities_seen": dict(Counter(c.rarity for c in cards).most_common()),
+        }
+    )
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     required = ["SORARE_EMAIL", "SORARE_PASSWORD", "SORARE_API_KEY", "INTERNAL_SECRET"]
