@@ -1,0 +1,36 @@
+scalar ISO8601DateTime
+enum Sport { BASEBALL FOOTBALL }
+enum Rarity { limited rare }
+type PageInfo { hasNextPage: Boolean! endCursor: String }
+type Query { currentUser: CurrentUser user(slug: String!): User }
+type User { slug: String! }
+type CurrentUser {
+  """Karty uživatele"""
+  cards(
+    sport: Sport
+    first: Int = 20
+    after: String
+  ): AnyCardConnection!
+  rewardedRankings(first: Int, after: String, sport: [Sport!]): So5RankingConnection! @deprecated(reason: "x (y)")
+}
+type AnyCardConnection { nodes: [AnyCardInterface!]! pageInfo: PageInfo! }
+interface AnyCardInterface {
+  slug: String!
+  rarityTyped: Rarity!
+  anyPlayer: AnyPlayerInterface
+  inVault: Boolean!
+}
+interface AnyPlayerInterface { slug: String! displayName: String! }
+type So5RankingConnection { nodes: [So5Ranking!]! pageInfo: PageInfo! }
+type So5Ranking { id: ID! ranking: Int overallScore: Float so5Lineup: So5Lineup so5Rewards: [So5Reward!]! }
+type So5Lineup { id: ID! so5Leaderboard: So5Leaderboard so5Appearances: [So5Appearance!]! }
+type So5Leaderboard { slug: String! displayName: String! rarityType: String so5Fixture: So5Fixture }
+type So5Fixture { slug: String! gameWeek: Int! sport: Sport! startDate: ISO8601DateTime endDate: ISO8601DateTime }
+type So5Appearance { score: Float captain: Boolean! anyCard: AnyCardInterface }
+type So5Reward { id: ID! amount: Money rewards: [AnyRewardInterface!]! }
+type Money { eurCents: Int usdCents: Int }
+interface AnyRewardInterface { id: ID! }
+type CardShardsReward implements AnyRewardInterface { id: ID! rarity: Rarity! quantity: Int! anyPlayer: AnyPlayerInterface }
+type MonetaryReward implements AnyRewardInterface { id: ID! amount: Money! }
+type CoinReward implements AnyRewardInterface { id: ID! amount: Float! }
+type AnyCardReward implements AnyRewardInterface { id: ID! card: AnyCardInterface! }
