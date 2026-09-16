@@ -120,3 +120,49 @@ def test_withdrawal_source_counts_when_general_has_none():
         ledger.normalize({"id": "3", "amount": {"eurCents": 400}}, "withdrawals", "withdrawal"),
     ]
     assert ledger.summarize(rows)["headline"]["withdrawn"] == 4
+
+
+def test_equivalents_are_not_double_counted():
+    row = ledger.normalize(
+        {"id": "1", "entryType": "DEPOSIT", "createdAt": "2022-01-01T00:00:00Z",
+         "amounts": {"eurCents": 10000, "usdCents": 11000, "wei": "30000000000000000", "referenceCurrency": "EUR"}},
+        "accountEntries",
+    )
+    assert row["eur"] == 100 and row["eth"] is None
+    s = ledger.summarize([row])
+    assert s["headline"]["deposited"] == 100 and not s["headline"]["eth"]
+
+
+def test_eth_deposit_keeps_eth_and_eur_equivalent():
+    row = ledger.normalize(
+        {"id": "1", "entryType": "DEPOSIT", "createdAt": "2021-05-01",
+         "amounts": {"eurCents": 30000, "wei": "100000000000000000", "referenceCurrency": "ETH"}},
+        "accountEntries",
+    )
+    assert row["eur"] == 300 and row["eth"] == 0.1
+    assert ledger.summarize([row])["headline"]["deposited"] == 300
+
+
+def test_payment_intent_wei_and_bool_date_field():
+    row = ledger.normalize(
+        {"id": "p1", "isUpdatable": True, "amount": "10100000000000000", "createdAt": "2021-11-02T10:00:00Z"},
+        "spentFiatPaymentIntents", "card_payment",
+    )
+    assert row["date"] == "2021-11-02T10:00:00"
+    assert row["eth"] == 0.0101 and row["eur"] is None
+    h = ledger.summarize([row])["headline"]
+    assert h["card_payments"] == 0 and h["card_payments_eth"] == 0.0101
+
+
+def test_packs_bought_for_gems_are_not_money():
+    pack = ledger.normalize(
+        {"id": "1", "description": "Pack - Gold", "createdAt": "2026-09-14",
+         "amounts": {"eurCents": 5000}}, "accountEntries",
+    )
+    mission = ledger.normalize(
+        {"id": "2", "description": "Mission - Collect Big 3 LaLiga", "createdAt": "2026-09-15",
+         "amounts": {"eurCents": 1000}}, "accountEntries",
+    )
+    assert pack["category"] == "pack" and mission["category"] == "reward"
+    h = ledger.summarize([pack, mission])["headline"]
+    assert h["spent"] == 0 and h["packs_count"] == 1 and h["packs_eur_equiv"] == 50
