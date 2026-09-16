@@ -92,8 +92,8 @@ function render(d) {
   DATA = d;
   const h = d.headline;
   const bal = d.balance && d.balance.values ? Object.entries(d.balance.values).filter(([k, v]) => v != null) : [];
-  $("#stamp").textContent = !d.available
-    ? `Sorare historii plateb ve schématu nenabízí (${d.reason || "neznámý důvod"}). Můžeš použít ruční záznamy.`
+  $("#stamp").innerHTML = !d.available
+    ? `Historii plateb se ze Sorare načíst nepodařilo: ${esc(d.reason || "bez udaného důvodu")}. Detail je v <a class="link" href="/nastaveni">Nastavení</a>, do té doby fungují ruční záznamy.`
     : `Zdroj: ${d.sources.join(", ")}. ${d.count} záznamů${d.first_date ? `, nejstarší ${day(d.first_date)}` : ""}.`;
 
   $("#result").innerHTML =
@@ -185,13 +185,16 @@ $("#m-add").onclick = async () => {
     load();
   } catch (e) { alert("Záznam se neuložil: " + e.message); }
 };
+function showError(e) {
+  $("#stamp").innerHTML = `Stahování selhalo: ${esc(e.message)}. Detail v <a class="link" href="/nastaveni">Nastavení</a>.`;
+}
 $("#sync").onclick = async () => {
   $("#sync").disabled = true;
   try {
     const r = await api("/api/ledger/sync", {body: {}});
     $("#stamp").textContent = `Staženo ${r.fetched} záznamů, nových ${r.new}.`;
     load();
-  } catch (e) { $("#stamp").textContent = "Stahování selhalo: " + e.message; }
+  } catch (e) { showError(e); }
   finally { $("#sync").disabled = false; }
 };
 $("#full").onclick = async () => {

@@ -179,7 +179,10 @@ async function load(refresh) {
     if (SPORT) q.set("sport", SPORT);
     if (refresh) q.set("refresh", "1");
     render(await api("/api/rewards?" + q));
-  } catch (e) { failed($("#totals"), e); }
+  } catch (e) {
+    $("#totals").innerHTML = `<div class="cell" style="grid-column:1/-1">Výhry se nenačetly: ${esc(e.message)}.
+      Detail v <a class="link" href="/nastaveni">Nastavení</a>, sekce Schéma Sorare.</div>`;
+  }
   finally { $("#sync").disabled = false; }
 }
 

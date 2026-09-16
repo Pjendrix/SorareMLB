@@ -58,6 +58,17 @@ BODY = """
 """
 
 SCRIPT = r"""
+function diag(d) {
+  if (!d) return "";
+  if (!d.ok) return `<div class="notice">${esc(d.error)}</div>`;
+  const list = (a) => a && a.length ? a.map(esc).join(", ") : "nic";
+  return `<table><tbody>
+    <tr><td>Velikost schématu</td><td>${num(d.sdl_bytes)} znaků, ${num(d.types)} typů</td></tr>
+    <tr><td>CurrentUser: související pole</td><td class="muted">${list(d.current_user_matches)}</td></tr>
+    <tr><td>User: související pole</td><td class="muted">${list(d.user_matches)}</td></tr>
+    <tr><td>Karta (${esc(d.card_type)})</td><td class="muted">${list(d.card_matches)}</td></tr>
+  </tbody></table>`;
+}
 const yes = (v) => `<span class="state ${v ? "on" : ""}">${v ? "Nastaveno" : "Chybí"}</span>`;
 (async () => {
   try {
@@ -80,9 +91,14 @@ const yes = (v) => `<span class="state ${v ? "on" : ""}">${v ? "Nastaveno" : "Ch
       <tr><td>Výhry (rewardedRankings)</td><td>${f.rewards_available ? `<span class="state on">Dostupné</span>` : `<span class="state stop">${esc(f.rewards_reason)}</span>`}</td></tr>
       <tr><td>Historie plateb</td><td>${f.ledger_available ? `<span class="state on">${f.ledger_sources.map(esc).join(", ")}</span>` : `<span class="state stop">${esc(f.ledger_reason)}</span>`}</td></tr>
       </tbody></table>
-      <p class="muted">Ukázka surových plateb pro doladění: <code>/api/ledger/debug</code></p>
+      ${diag(f.diagnostics)}
+      <p class="muted">Ukázka surových plateb pro doladění: <code>/api/ledger/debug</code>. Celý výpis pro kontrolu: <a class="link" href="/api/schema-features">/api/schema-features</a></p>
       <p><button class="btn" id="schema-refresh">Načíst schéma znovu</button></p>`;
-    $("#schema-refresh").onclick = async () => { await api("/api/schema-features?refresh=1"); location.reload(); };
+    $("#schema-refresh").onclick = async () => {
+      $("#schema-refresh").disabled = true;
+      try { await api("/api/schema-features?refresh=1"); location.reload(); }
+      catch (e) { alert("Schéma se nenačetlo: " + e.message); $("#schema-refresh").disabled = false; }
+    };
   } catch (e) { failed($("#schema"), e); }
   try {
     const c = await api("/api/config-summary");
