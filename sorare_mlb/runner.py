@@ -322,6 +322,7 @@ def _step_validate(job: Job, config: Config, deadline: float) -> None:
 def _step_submit(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
     lineups = [_lineup_from_dict(d) for d in job.lineups]
+    cards, _ = _rebuild(job, config)
     boards_by_slug = {b["slug"]: b["id"] for b in (job.leaderboards or [])}
     # Každá sestava v jednom leaderboardu potřebuje vlastní manager team;
     # Sorare jinak hlásí "This manager team already has a lineup".
@@ -333,6 +334,24 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
         b["slug"]: bool(b.get("requiresManagerTeam"))
         for b in (job.leaderboards or [])
     }
+
+    # Sorare mapuje appearances na sloty podle pořadí, takže kontrolujeme
+    # obojí: že karta na pozici slotu sedí, i v jakém pořadí se posílá.
+    slots_cfg = config.get_path("lineup.slots", {})
+    by_slug = {c.slug: c for c in cards}
+    for lineup in lineups:
+        popis = []
+        for i, slot in enumerate(lineup.slots):
+            card = by_slug.get(slot.card_slug)
+            positions = card.positions if card else []
+            allowed = slots_cfg.get(slot.slot, [])
+            ok = bool(set(positions) & set(allowed))
+            popis.append(
+                f"{i}:{slot.slot}={slot.player_name}"
+                f"[{','.join(p.replace('BASEBALL_', '') for p in positions)}]"
+                + ("" if ok else " !NESEDÍ")
+            )
+        job.log_step(f"  {lineup.tournament_name} #{lineup.index + 1}: " + " | ".join(popis))
 
     already = {(s["tournament_slug"], s.get("index", 0)) for s in job.submitted if s.get("ok")}
     for lineup in lineups:
@@ -449,12 +468,17 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
             continue
 
         for board in matches:
-            already = int(board.get("mySo5LineupsCount") or 0)
             wanted = int(spec.get("max_lineups", 1))
-            remaining = max(0, wanted - already)
-            if remaining == 0:
-                job.log_step(f"{spec['name']} ({board['slug']}): už odesláno")
-                continue
+            if config.get_path("submission.overwrite_existing", False):
+                # createOrUpdate existující sestavu přepíše, takže se nemusíme
+                # ohlížet na to, kolik jich už je.
+                remaining = wanted
+            else:
+                already = int(board.get("mySo5LineupsCount") or 0)
+                remaining = max(0, wanted - already)
+                if remaining == 0:
+                    job.log_step(f"{spec['name']} ({board['slug']}): už odesláno")
+                    continue
 
             out.append(
                 Tournament(
