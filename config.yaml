@@ -81,6 +81,11 @@ stack:
   max_from_team: 6         # tvrdý strop podle pravidel Sorare MLB
   apply_to: [Hot Streaks]  # stack chceme hlavně ve vlajkové sestavě
 
+submission:
+  # true = skládat i turnaje, kde už sestavu máš (mutace je createOrUpdate,
+  # takže ji přepíše). Užitečné, když chceš po opravě přegenerovat všechno.
+  overwrite_existing: false
+
 # Bezpečnostní pravidla.
 safety:
   # Karta se nepustí do Hot Streaks, pokud její odhadovaný floor je pod tímhle.

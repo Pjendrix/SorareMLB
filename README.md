@@ -176,7 +176,7 @@ Bez `KV_REST_API_*` se použije `.local-store.json`, takže Redis lokálně
 nepotřebuješ.
 
 ```bash
-pytest -q     # 47 testů (optimalizátor, pipeline, 2FA), žádná síť
+pytest -q     # 52 testů (optimalizátor, pipeline, 2FA), žádná síť
 ```
 
 ---
