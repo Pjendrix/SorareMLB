@@ -41,6 +41,8 @@ class SportAdapter:
         by_rarity: dict[str, int] = {}
         by_position: dict[str, int] = {}
         rows = []
+        vault = [c for c in cards if c.in_vault]
+        cards = [c for c in cards if not c.in_vault]
         for card in cards:
             by_rarity[card.rarity] = by_rarity.get(card.rarity, 0) + 1
             for pos in card.positions[:1]:
@@ -72,6 +74,11 @@ class SportAdapter:
 
         return {
             "count": len(rows),
+            "vault_count": len(vault),
+            "vault": [
+                {"player": c.player.name, "rarity": c.rarity, "season": c.season, "team": c.player.team_name}
+                for c in sorted(vault, key=lambda c: c.player.name)
+            ][:60],
             "by_rarity": dict(sorted(by_rarity.items(), key=lambda kv: -kv[1])),
             "by_position": dict(sorted(by_position.items(), key=lambda kv: -kv[1])),
             "avg_l15": _round(sum(l15s) / len(l15s)) if l15s else None,
