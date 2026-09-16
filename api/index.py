@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -56,6 +56,37 @@ async def normalize_vercel_path(request: Request, call_next):
         )
         request.scope["path"] = original.split("?")[0] or "/"
     return await call_next(request)
+
+PUBLIC_PATHS = ("/api/cron", "/api/continue")
+
+
+@app.middleware("http")
+async def password_gate(request: Request, call_next):
+    """Volitelné heslo na celou aplikaci (APP_PASSWORD).
+
+    Aplikace ukazuje peníze a historii účtu, takže bez hesla je vidí každý,
+    kdo zná URL. Cron a interní navázání mají vlastní secret.
+    """
+    password = os.environ.get("APP_PASSWORD")
+    if not password or request.url.path.startswith(PUBLIC_PATHS):
+        return await call_next(request)
+
+    import base64
+    import secrets as _secrets
+
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("basic "):
+        try:
+            _, _, given = base64.b64decode(header[6:]).decode().partition(":")
+            if _secrets.compare_digest(given, password):
+                return await call_next(request)
+        except Exception:  # noqa: BLE001
+            pass
+    return Response(
+        "Přihlášení vyžadováno.", status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Sorare", charset="UTF-8"'},
+    )
+
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
@@ -160,15 +191,110 @@ def api_rewards(sport: str | None = None, refresh: bool = False) -> JSONResponse
     sync = None
     if refresh or not rewards.archive(sport):
         sync = _sorare_call(rewards.sync, config, sport)
-    rows = rewards.archive(sport)
+    summary = rewards.summarize(_visible_rewards(config, sport), sport)
+    summary["sync"] = sync
+    summary["backfill"] = rewards.backfill_status()
+    return JSONResponse(summary)
+
+
+def _visible_rewards(config, sport: str | None = None) -> list[dict]:
+    from sorare_mlb import rewards
+
     # Fotbal: jen rarity, které hraješ (sports.football.board_rarities).
-    rows = [
-        r for r in rows
+    return [
+        r for r in rewards.archive(sport)
         if r["sport"] not in ADAPTERS or overview._rarity_ok(r["sport"], r.get("rarity"), config)
     ]
-    summary = rewards.summarize(rows, sport)
-    summary["sync"] = sync
-    return JSONResponse(summary)
+
+
+@app.post("/api/rewards/backfill")
+def api_rewards_backfill(payload: dict | None = None) -> JSONResponse:
+    """Jedna dávka stahování celé historie výher. Volej, dokud `done` není true."""
+    from sorare_mlb import rewards
+
+    if (payload or {}).get("reset"):
+        rewards.reset_backfill()
+    return JSONResponse(_sorare_call(rewards.sync, _config(), None, True))
+
+
+# --------------------------------------------------------------------- bilance
+
+
+@app.get("/api/ledger")
+def api_ledger() -> JSONResponse:
+    from sorare_mlb import ledger, rewards
+
+    config = _config()
+    reward_money = rewards.summarize(_visible_rewards(config))["totals"]["money"]
+    rows = ledger.ARCHIVE.rows() + ledger.manual_entries()
+    rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    data = ledger.summarize(rows, reward_money)
+    feats = get_features_safe().get("ledger") or {}
+    data["available"] = feats.get("available", False)
+    data["reason"] = feats.get("reason")
+    data["sources"] = [src["field"] for src in feats.get("sources") or []]
+    data["categories_map"] = ledger.CATEGORIES
+    return JSONResponse(data)
+
+
+def get_features_safe() -> dict:
+    from sorare_mlb.features import get_features
+
+    try:
+        return get_features()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+@app.post("/api/ledger/sync")
+def api_ledger_sync(payload: dict | None = None) -> JSONResponse:
+    from sorare_mlb import ledger
+
+    payload = payload or {}
+    if payload.get("reset"):
+        ledger.reset_backfill()
+    return JSONResponse(_sorare_call(ledger.sync, _config(), bool(payload.get("full"))))
+
+
+@app.post("/api/ledger/manual")
+def api_ledger_manual(payload: dict) -> JSONResponse:
+    from sorare_mlb import ledger
+
+    try:
+        entry = ledger.add_manual(
+            payload.get("category", ""), float(payload.get("eur")),
+            str(payload.get("date", "")), str(payload.get("note", "")),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"Záznam nejde uložit: {exc}") from exc
+    return JSONResponse(entry)
+
+
+@app.delete("/api/ledger/manual/{entry_id}")
+def api_ledger_manual_delete(entry_id: str) -> JSONResponse:
+    from sorare_mlb import ledger
+
+    if not ledger.delete_manual(entry_id):
+        raise HTTPException(404, "Záznam nenalezen.")
+    return JSONResponse({"deleted": entry_id})
+
+
+@app.get("/api/ledger/debug")
+def api_ledger_debug(refresh: bool = False) -> JSONResponse:
+    """Nalezené zdroje plateb a ukázka syrových dat — pro doladění třídění."""
+    from sorare_mlb import ledger
+    from sorare_mlb.features import get_features
+
+    feats = get_features(refresh=refresh).get("ledger") or {}
+    return JSONResponse({
+        "candidates": feats.get("candidates"),
+        "sources": [{k: src[k] for k in ("field", "query")} for src in feats.get("sources") or []],
+        "balance_query": feats.get("balance_query"),
+        "samples": ledger.samples(),
+        "types_seen": sorted({
+            f"{r.get('type')} → {r.get('category')}" for r in ledger.ARCHIVE.rows()
+        })[:80],
+    })
 
 
 @app.get("/api/schema-features")
@@ -184,6 +310,9 @@ def api_schema_features(refresh: bool = False) -> JSONResponse:
             "rewards_available": rewards_info.get("available", False),
             "rewards_reason": rewards_info.get("reason"),
             "rewards_query": rewards_info.get("query"),
+            "ledger_available": (feats.get("ledger") or {}).get("available", False),
+            "ledger_sources": [x["field"] for x in (feats.get("ledger") or {}).get("sources") or []],
+            "ledger_reason": (feats.get("ledger") or {}).get("reason"),
         }
     )
 
@@ -641,7 +770,7 @@ def health() -> JSONResponse:
     required = ["SORARE_EMAIL", "SORARE_PASSWORD", "SORARE_API_KEY", "INTERNAL_SECRET"]
     auth = token_status()
     optional = [
-        "KV_REST_API_URL", "KV_REST_API_TOKEN", "APP_BASE_URL",
+        "KV_REST_API_URL", "KV_REST_API_TOKEN", "APP_BASE_URL", "APP_PASSWORD",
         "DISCORD_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     ]
     store_kind = type(get_store()).__name__
