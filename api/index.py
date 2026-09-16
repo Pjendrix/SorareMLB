@@ -481,45 +481,29 @@ def starters(
 
     client = SorareClient(_config())
     boards = client.fetch_leaderboards()
-    if slug:
-        boards = [b for b in boards if slug in b.get("slug", "")]
 
-    # Postupně ubíráme filtry, ať je vidět, který z nich lavičku vyprázdní.
-    variants = [
-        ("bez filtrů", {}),
-        ("includeNoGame=true", {"includeNoGame": True}),
-        ("odds>=1", {"starterOddsBasisPointsRange": {"min": 1}}),
-        (f"odds>={min_odds}", {"starterOddsBasisPointsRange": {"min": min_odds}}),
-        (
-            f"odds>={min_odds} + includeUsed",
-            {
-                "starterOddsBasisPointsRange": {"min": min_odds},
-                "includeNoGame": False,
-                "includeUsed": True,
-            },
-        ),
-    ]
+    # Fixture je jeden na gameweek, takže se ptáme jednou za fixture.
+    fixtures = {}
+    for board in boards:
+        fixture = board.get("so5Fixture") or {}
+        if fixture.get("slug") and (not slug or slug in fixture["slug"]):
+            fixtures[fixture["slug"]] = fixture
 
     results = []
-    for board in boards[:2]:
-        board_result = {"leaderboard": board.get("slug"), "variants": []}
-        for label, filters in variants:
-            nodes, error = client.fetch_bench(board["slug"], filters, limit_pages=2)
-            board_result["variants"].append(
-                {
-                    "filtr": label,
-                    "count": len(nodes),
-                    "error": error,
-                    "ukazka": [
-                        f"{(n.get('anyPlayer') or {}).get('displayName')} "
-                        f"({n.get('position')})"
-                        for n in nodes[:5]
-                    ],
-                }
-            )
-        results.append(board_result)
+    for fixture_slug, fixture in list(fixtures.items())[:3]:
+        found, error = client.fetch_probable_starters(fixture_slug)
+        results.append(
+            {
+                "fixture": fixture_slug,
+                "gameWeek": fixture.get("gameWeek"),
+                "obdobi": f"{fixture.get('startDate')} – {fixture.get('endDate')}",
+                "count": len(found),
+                "players": sorted(found)[:60],
+                "error": error,
+            }
+        )
 
-    return JSONResponse({"min_odds": min_odds, "results": results})
+    return JSONResponse({"results": results})
 
 
 @app.get("/api/health")
