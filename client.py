@@ -13,7 +13,7 @@ import requests
 from . import queries
 from .auth import Token, ensure_token
 from .models import Card, Config, Player, env
-from .store import K_CARDS, K_SCORES, get_store
+from .store import K_CARDS, get_store
 
 
 class SorareError(RuntimeError):
@@ -113,6 +113,7 @@ class SorareClient:
     # ------------------------------------------------------------------ data
 
     def fetch_cards(self, use_cache: bool = True) -> list[Card]:
+        """Karty i s posledními skóre — obojí přijde v jedné odpovědi."""
         if use_cache:
             cached = self.store.get_json(K_CARDS)
             if cached:
@@ -126,90 +127,149 @@ class SorareClient:
                 {"rarities": self.config.get("rarities", ["limited", "rare"]), "after": cursor},
                 operation_name="UserBaseballCards",
             )
-            block = ((body.get("data") or {}).get("currentUser") or {}).get("baseballCards") or {}
+            block = ((body.get("data") or {}).get("currentUser") or {}).get("cards") or {}
             nodes.extend(block.get("nodes") or [])
             page = block.get("pageInfo") or {}
             if not page.get("hasNextPage"):
                 break
             cursor = page.get("endCursor")
 
-        # Portfolio se mění zřídka — držíme ho 12 h, ať se pipeline nezdržuje.
-        self.store.set(K_CARDS, nodes, ttl_seconds=12 * 3600)
+        # Portfolio se mění zřídka, ale skóre ano — 2 h je rozumný kompromis.
+        self.store.set(K_CARDS, nodes, ttl_seconds=2 * 3600)
         return [card_from_dict(n) for n in nodes]
 
-    def fetch_scores_batch(self, slugs: list[str]) -> dict[str, dict]:
-        """Jedna dávka hráčů: skóre + datum posledního zápasu.
+    def fetch_scores(self, cards: list[Card]) -> dict[str, dict]:
+        """Skóre už máme z fetch_cards; tohle je jen přerovnání podle hráče."""
+        out: dict[str, dict] = {}
+        for card in cards:
+            if card.player.slug and card.player.slug not in out:
+                out[card.player.slug] = {
+                    "scores": card.recent_scores,
+                    "last_game": card.last_game,
+                }
+        return out
 
-        Datum bereme ze stejné odpovědi, takže filtr neaktivních hráčů
-        nestojí ani jedno volání navíc.
+    def fetch_probable_starters(
+        self, fixture_slug: str, min_odds: int = 5000
+    ) -> tuple[set[str], str | None]:
+        """Slugy nadhazovačů ohlášených jako startéři v tomhle gameweeku.
+
+        Zdrojem jsou zápasy fixture — to je to, z čeho Sorare kreslí odznak
+        "PP" na kartě. `min_odds` se nepoužívá, zůstává kvůli kompatibilitě
+        volání.
+
+        Vrací (slugy, chyba). Chybu vracíme ven, ať je vidět v logu: jinak
+        se tiše postaví sestava s nadhazovači, kteří nenastoupí.
         """
-        key = K_SCORES.format(batch=_hash(slugs))
-        cached = self.store.get_json(key)
-        if cached is not None:
-            return cached
-
         body = self.execute(
-            queries.PLAYER_SCORES, {"slugs": slugs}, operation_name="PlayerScores"
+            queries.PROBABLE_STARTERS,
+            {"slug": fixture_slug},
+            operation_name="FixtureProbablePitchers",
+            tolerate_errors=True,
         )
-        chunk: dict[str, dict] = {}
-        for node in (body.get("data") or {}).get("baseballPlayers") or []:
-            stats = (node.get("gameStats") or {}).get("nodes") or []
-            played = [s for s in stats if s.get("score") is not None]
-            dates = [
-                (s.get("game") or {}).get("startDate")
-                for s in played
-                if (s.get("game") or {}).get("startDate")
-            ]
-            chunk[node["slug"]] = {
-                "scores": [float(s["score"]) for s in played],
-                "last_game": max(dates) if dates else None,
-            }
+        if body.get("errors"):
+            return set(), "; ".join(
+                e.get("message", "?") for e in body["errors"]
+            )[:300]
 
-        self.store.set(key, chunk, ttl_seconds=6 * 3600)
-        return chunk
+        fixture = ((body.get("data") or {}).get("so5") or {}).get("so5Fixture") or {}
+        games = fixture.get("anyGames") or []
+        if not games:
+            return set(), "fixture nevrátil žádné zápasy"
 
-    def fetch_open_fixture(self) -> dict | None:
-        body = self.execute(queries.UPCOMING_FIXTURES, operation_name="UpcomingBaseballFixtures")
-        nodes = (((body.get("data") or {}).get("baseball") or {}).get("allFixtures") or {}).get(
-            "nodes"
-        ) or []
-        for node in nodes:
-            if str(node.get("state", "")).lower() in ("opened", "open", "upcoming"):
-                return node
-        return nodes[0] if nodes else None
+        found = {
+            p.get("slug")
+            for game in games
+            for p in (game.get("probablePitchers") or [])
+            if p.get("slug")
+        }
+        return found, None if found else f"v {len(games)} zápasech nikdo ohlášený"
 
-    def fetch_competitions(self, fixture_slug: str) -> list[dict]:
-        body = self.execute(
-            queries.FIXTURE_TOURNAMENTS,
-            {"fixtureSlug": fixture_slug},
-            operation_name="FixtureCompetitions",
-        )
-        fixture = ((body.get("data") or {}).get("baseball") or {}).get("fixture") or {}
-        return ((fixture.get("competitions") or {}).get("nodes")) or []
+    def fetch_bench(
+        self, leaderboard_slug: str, filters: dict, limit_pages: int = 6
+    ) -> tuple[list[dict], str | None]:
+        """Lavička leaderboardu s libovolnými filtry. Pro ladění i pro provoz."""
+        nodes: list[dict] = []
+        cursor: str | None = None
 
-    # ------------------------------------------------------------------ mutation
-
-    def submit_lineup(self, competition_slug: str, card_slugs: list[str]) -> dict:
-        variants = [
-            (queries.SUBMIT_LINEUP_PRIMARY, "CreateBaseballLineup", "createBaseballLineup"),
-            (queries.SUBMIT_LINEUP_FALLBACK, "SubmitLineup", "submitLineup"),
-        ]
-        errors: list[str] = []
-        for mutation, op_name, field in variants:
+        for _ in range(limit_pages):
             body = self.execute(
-                mutation,
-                {"input": {"competitionSlug": competition_slug, "cardSlugs": card_slugs}},
-                operation_name=op_name,
+                queries.BENCH_PROBE,
+                {"slug": leaderboard_slug, "filters": filters, "after": cursor},
+                operation_name="BenchProbe",
                 tolerate_errors=True,
             )
             if body.get("errors"):
-                errors.append(str(body["errors"]))
-                continue
-            result = (body.get("data") or {}).get(field) or {}
-            if result.get("errors"):
-                raise SorareError(f"Sorare sestavu odmítl: {result['errors']}")
-            return result
-        raise SorareError("Submit mutace neprošla ani v jedné variantě: " + " | ".join(errors))
+                return [], "; ".join(
+                    e.get("message", "?") for e in body["errors"]
+                )[:300]
+
+            board = ((body.get("data") or {}).get("so5") or {}).get("so5Leaderboard") or {}
+            bench = board.get("myFilteredBench")
+            if bench is None:
+                return [], "myFilteredBench nevrátil nic"
+
+            nodes.extend(bench.get("nodes") or [])
+            page = bench.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            cursor = page.get("endCursor")
+
+        return nodes, None
+
+    def fetch_leaderboards(self) -> list[dict]:
+        """Otevřené baseballové leaderboardy — to, čemu v configu říkáme turnaje."""
+        body = self.execute(queries.UPCOMING_LEADERBOARDS, operation_name="UpcomingLeaderboards")
+        boards = ((body.get("data") or {}).get("so5") or {}).get("upcomingLeaderboards") or []
+        return [
+            b for b in boards
+            if str(((b.get("so5Fixture") or {}).get("sport") or "")).upper() == "BASEBALL"
+        ]
+
+    # ------------------------------------------------------------------ mutation
+
+    def submit_lineup(
+        self,
+        leaderboard_id: str,
+        card_slugs: list[str],
+        manager_team_id: str | None = None,
+        requires_manager_team: bool = False,
+    ) -> dict:
+        """Odešle sestavu. Chce ID leaderboardu, ne slug.
+
+        `captain` je v So5AppearanceInput povinný; v MLB kapitána neřešíme,
+        takže posíláme false u všech. Některé soutěže (Challenger) vyžadují
+        manager team — když ho uživatel nemá, necháme ho Sorare založit.
+        """
+        appearances = [
+            {"cardSlug": slug, "captain": False, "index": i}
+            for i, slug in enumerate(card_slugs)
+        ]
+        payload: dict = {
+            "so5LeaderboardId": leaderboard_id,
+            "so5Appearances": appearances,
+        }
+        # Hot Streak Champion manager team nepovoluje vůbec ("can't have more
+        # than 0"), Challenger ho naopak vyžaduje pro každou sestavu zvlášť.
+        if manager_team_id:
+            payload["managerTeamId"] = manager_team_id
+        elif requires_manager_team:
+            payload["shouldCreateManagerTeam"] = True
+
+        body = self.execute(
+            queries.SUBMIT_LINEUP,
+            {"input": payload},
+            operation_name="CreateOrUpdateSo5Lineup",
+            tolerate_errors=True,
+        )
+        if body.get("errors"):
+            raise SorareError(f"Sorare odmítlo mutaci: {body['errors']}")
+
+        result = (body.get("data") or {}).get("createOrUpdateSo5Lineup") or {}
+        if result.get("errors"):
+            messages = "; ".join(e.get("message", "?") for e in result["errors"])
+            raise SorareError(f"Sorare sestavu odmítl: {messages}")
+        return result
 
     # ------------------------------------------------------------------ probe
 
@@ -225,22 +285,61 @@ class SorareClient:
         return (body.get("data") or {}).get("__type")
 
 
+def _current_season() -> int:
+    """Sezóna, která právě dává season bonus.
+
+    MLB sezóna se kryje s kalendářním rokem, takže stačí rok — a v lednu
+    a únoru, kdy se ještě nehraje, platí ta předchozí.
+    """
+    from datetime import date
+
+    today = date.today()
+    return today.year if today.month >= 3 else today.year - 1
+
+
 def card_from_dict(node: dict) -> Card:
-    raw = node.get("player") or {}
-    team = raw.get("team") or {}
+    raw = node.get("anyPlayer") or {}
+    team = node.get("anyTeam") or {}
+
+    # Pozice chodí VELKÝMI písmeny (STARTING_PITCHER); držíme je tak,
+    # jak přijdou, a config.yaml je mapuje stejně.
+    positions = [str(p).upper() for p in (node.get("anyPositions") or [])]
+
+    scores, dates = [], []
+    for entry in raw.get("playerGameScores") or []:
+        if entry is None or entry.get("score") is None:
+            continue
+        scores.append(float(entry["score"]))
+        date = (entry.get("anyGame") or {}).get("date")
+        if date:
+            dates.append(date)
+
     player = Player(
         slug=raw.get("slug", ""),
         name=raw.get("displayName", "?"),
-        positions=[str(p).lower() for p in (raw.get("positions") or [])],
+        positions=positions,
         team_slug=team.get("slug"),
-        team_name=team.get("abbreviation") or team.get("name"),
+        team_name=team.get("name"),
     )
     return Card(
         slug=node.get("slug", ""),
-        rarity=str(node.get("rarity", "")).lower(),
+        rarity=str(node.get("rarityTyped", "")).lower(),
         season=node.get("seasonYear"),
         player=player,
+        recent_scores=scores,
+        last_game=max(dates) if dates else None,
+        # `inSeasonEligible` neodpovídá season bonusu, jak ho počítá Sorare
+        # při validaci sestavy — rozhoduje ročník karty.
+        in_season=int(node.get("seasonYear") or 0) >= _current_season(),
+        sorare_projection=_as_float(raw.get("nextClassicFixtureProjectedScore")),
     )
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hash(slugs: list[str]) -> str:
