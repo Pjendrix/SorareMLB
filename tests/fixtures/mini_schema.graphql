@@ -34,3 +34,12 @@ type CardShardsReward implements AnyRewardInterface { id: ID! rarity: Rarity! qu
 type MonetaryReward implements AnyRewardInterface { id: ID! amount: Money! }
 type CoinReward implements AnyRewardInterface { id: ID! amount: Float! }
 type AnyCardReward implements AnyRewardInterface { id: ID! card: AnyCardInterface! }
+extend type CurrentUser {
+  accountEntries(first: Int, after: String): AccountEntryConnection!
+  fiatWallet: FiatWallet
+  availableBalance: String
+}
+type FiatWallet { availableBalance: Int currency: String }
+type AccountEntryConnection { nodes: [AccountEntry!]! pageInfo: PageInfo! }
+type AccountEntry { id: ID! entryType: AccountEntryType! createdAt: ISO8601DateTime! amounts: Money! status: String description(locale: String): String }
+enum AccountEntryType { DEPOSIT WITHDRAWAL AUCTION_BID SALE FEE }
