@@ -8,6 +8,7 @@ který skládá sestavy pro **Hot Streaks** a **Challenger**.
 | Cesta | Obsah |
 |---|---|
 | `/` | Dashboard: nejbližší uzávěrky, co potřebuje pozornost, sbírky, stav automatu, poslední sestavy |
+| `/vyhry` | Peníze, Essence, karty a coiny: po soutěžích, gameweecích, kartách a hráčích |
 | `/mlb`, `/fotbal` | Sbírka: rarity, pozice, forma (L5/L15, trend), karty bez zápasu, otevřené turnaje, filtr karet |
 | `/mlb/sestavy` | Builder sestav MLB (návrh, kontrola, odeslání) |
 | `/fotbal/sestavy` | Placeholder: plánovaný formát, otevřené turnaje, co zbývá |
@@ -31,6 +32,20 @@ tools/schema.py  lokální prohlížení veřejného GraphQL schématu Sorare
 Sorare API vrací jen probíhající a nedávné sestavy. Aplikace si proto ukládá
 vlastní historii: záznam o každém dokončeném běhu automatu (max. 200)
 a jednou denně snímek sbírky při otevření přehledu (max. 400 na sport).
+
+### Výhry, Essence a trezor
+
+Aplikace si jednou denně stáhne veřejné schéma Sorare (`sorare_mlb/schema.py`)
+a dotazy na výhry a příznak trezoru poskládá jen z polí, která v něm opravdu
+jsou (`sorare_mlb/features.py`). Co našla, ukazuje `/nastaveni`.
+
+Výhry se berou z `rewardedRankings` a ukládají do archivu v Redisu
+(max. 500 umístění na sport). Essence s uvedeným hráčem se přiřadí přesně,
+zbytek odměny sestavy se rozpočítá mezi karty podle podílu na bodech.
+Sorare u `rewardedRankings` nevrací všechno, např. odměny za streaky
+(issue #670 v sorare/api).
+
+Karty v trezoru se nepočítají do formy ani „leží ladem“ a automat je nepoužívá.
 
 ### Nejisté části schématu
 

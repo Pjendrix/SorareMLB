@@ -140,10 +140,16 @@ sports:
     enabled: true
     # Skládání fotbalových sestav zatím není hotové (FootballAdapter).
     lineups_enabled: false
-    rarities: [limited, rare, super_rare, unique]
+    # Hraješ jen Limited: karty i turnaje se filtrují na tuhle raritu.
+    rarities: [limited]
+    board_rarities: [limited]
     # Jedna stránka = 20 karet. Vercel funkce má 60 s, 15 stránek je bezpečně.
     max_card_pages: 15
     idle_after_days: 14
     # Turnaje, které se na dashboardu hlídají (chybějící sestava = upozornění).
     # Formát stejný jako `tournaments` výše; slugy zjistíš na /api/upcoming.
     tournaments: []
+
+rewards:
+  # Kolik stránek (po 50 umístěních) stáhnout na sport při synchronizaci.
+  max_pages: 6
