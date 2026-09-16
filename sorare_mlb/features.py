@@ -6,6 +6,7 @@ takže SDL se stahuje nejvýš jednou denně.
 from __future__ import annotations
 
 import logging
+import re
 
 from .schema import Schema, load_schema
 from .store import get_store
@@ -48,6 +49,7 @@ def build_features(s: Schema) -> dict:
     return {
         "vault": _vault(s),
         "rewards": _rewards(s),
+        "ledger": _ledger(s),
     }
 
 
@@ -237,3 +239,130 @@ def _rewards(s: Schema) -> dict:
         "sport_is_list": has_sport and conn.arg_types.get("sport", "").startswith("["),
         "root_key": "currentUser" if root[1] == "currentUser" else "user",
     }
+
+
+# ------------------------------------------------------------------ peníze
+
+LEDGER_PREFERENCE = (
+    "accountEntries", "myAccountEntries", "walletTransactions", "transactions",
+    "paymentHistory", "payments", "tokenOperations", "activities",
+)
+LEDGER_RX = r"accountEntr|transaction|payment|withdraw|deposit|operation|ledger|walletEntr|payout"
+LEAF_RX = r"^id$|At$|date|type|kind|status|direction|description|label|reason|currency|amount|cents|wei|value|price|fee|sign|credit|debit"
+MONEY_RX = r"cents|wei|amount|value"
+
+
+def _money_object(s: Schema, base: str) -> list[str]:
+    """Listová pole objektu, který vypadá jako částka."""
+    t = s.types.get(base)
+    if not t or t.kind not in ("type", "interface"):
+        return []
+    leaves = [f.name for f in t.fields.values() if _is_leaf(s, f.base) and re.search(MONEY_RX + "|currency", f.name, re.I)]
+    return leaves if any(re.search(MONEY_RX, n, re.I) for n in leaves) else []
+
+
+def _entry_selection(s: Schema, type_name: str, prefix: str = "") -> list[str]:
+    t = s.types.get(type_name)
+    if not t:
+        return []
+    out = []
+    for f in t.fields.values():
+        alias = f"{prefix}{f.name}: " if prefix else ""
+        if f.args and any(a for a in f.args if a not in ("first", "after", "last", "before")):
+            continue
+        if _is_leaf(s, f.base):
+            if re.search(LEAF_RX, f.name, re.I):
+                out.append(f"{alias}{f.name}")
+        else:
+            money = _money_object(s, f.base)
+            if money:
+                out.append(f"{alias}{f.name} {{ {' '.join(money)} }}")
+    return out
+
+
+def _ledger(s: Schema) -> dict:
+    user = s.types.get("CurrentUser")
+    if not user:
+        return {"available": False, "reason": "Schéma nemá CurrentUser.", "candidates": []}
+
+    candidates = [
+        n for n in s.find("CurrentUser", LEDGER_RX)
+        if s.field("CurrentUser", n) and not _is_leaf(s, s.field("CurrentUser", n).base)
+    ]
+    candidates.sort(key=lambda n: (LEDGER_PREFERENCE.index(n) if n in LEDGER_PREFERENCE else 99, n))
+
+    sources = []
+    for name in candidates[:4]:
+        fdef = s.field("CurrentUser", name)
+        node = s.node_type("CurrentUser", name)
+        is_conn = s.has(fdef.base, "nodes")
+        kind = (s.types.get(node) or TypeDefStub).kind
+        if kind in ("union", "interface"):
+            fields = ["__typename"]
+            fields += _entry_selection(s, node) if kind == "interface" else []
+            for concrete in s.possible_types(node):
+                inner = _entry_selection(s, concrete, prefix=f"{concrete}__")
+                if inner:
+                    fields.append(f"... on {concrete} {{ {' '.join(inner)} }}")
+        else:
+            fields = _entry_selection(s, node)
+        if len(fields) < 2:
+            continue
+        args = []
+        var_defs = []
+        if is_conn:
+            if "first" in fdef.args:
+                args.append("first: 50")
+            if "after" in fdef.args:
+                args.append("after: $after")
+                var_defs.append("$after: String")
+        arg_text = f"({', '.join(args)})" if args else ""
+        var_text = f"({', '.join(var_defs)})" if var_defs else ""
+        body = (
+            f"pageInfo {{ hasNextPage endCursor }} nodes {{ {' '.join(fields)} }}"
+            if is_conn else " ".join(fields)
+        )
+        op = f"Ledger{name[0].upper()}{name[1:]}"
+        sources.append({
+            "field": name,
+            "paginated": is_conn and "after" in fdef.args,
+            "connection": is_conn,
+            "operation": op,
+            "query": f"query {op}{var_text} {{ currentUser {{ {name}{arg_text} {{ {body} }} }} }}",
+        })
+
+    # zůstatky
+    balance_parts = []
+    for f in user.fields.values():
+        if f.args:
+            continue
+        if re.search(r"balance", f.name, re.I):
+            if _is_leaf(s, f.base):
+                balance_parts.append(f.name)
+            else:
+                money = _money_object(s, f.base)
+                if money:
+                    balance_parts.append(f"{f.name} {{ {' '.join(money)} }}")
+        elif re.search(r"wallet|account", f.name, re.I) and not _is_leaf(s, f.base):
+            inner = [
+                x.name for x in (s.types.get(f.base) or TypeDefStub).fields.values()
+                if re.search(r"balance", x.name, re.I) and _is_leaf(s, x.base) and not x.args
+            ]
+            if inner:
+                balance_parts.append(f"{f.name} {{ {' '.join(inner)} }}")
+    balance_query = (
+        f"query Balances {{ currentUser {{ {' '.join(balance_parts)} }} }}" if balance_parts else None
+    )
+
+    return {
+        "available": bool(sources),
+        "reason": None if sources else "Ve schématu jsem nenašel historii plateb.",
+        "candidates": candidates,
+        "sources": sources,
+        "balance_query": balance_query,
+    }
+
+
+class TypeDefStub:
+    kind = ""
+    fields: dict = {}

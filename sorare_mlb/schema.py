@@ -90,10 +90,12 @@ class Schema:
 
     def _parse(self, sdl: str) -> None:
         head = re.compile(
-            r"^(type|interface|input|union|enum)\s+(\w+)([^{=\n]*)(\{|=)?", re.M
+            r"^(extend\s+)?(type|interface|input|union|enum)\s+(\w+)([^{=\n]*)(\{|=)?", re.M
         )
         for m in head.finditer(sdl):
-            kind, name, rest, opener = m.group(1), m.group(2), m.group(3), m.group(4)
+            extend = bool(m.group(1))
+            kind, name, rest, opener = m.group(2), m.group(3), m.group(4), m.group(5)
+            previous = self.types.get(name) if extend else None
             t = TypeDef(kind=kind, name=name)
             impl = re.search(r"implements\s+([\w\s&,]+)", rest or "")
             if impl:
@@ -116,6 +118,11 @@ class Schema:
                 end = _matching_brace(sdl, m.end() - 1)
                 if kind in ("type", "interface", "input"):
                     t.fields = _parse_fields(sdl[m.end(): end])
+            if previous:
+                previous.fields.update(t.fields)
+                previous.implements += t.implements
+                previous.members += t.members
+                continue
             self.types[name] = t
 
 

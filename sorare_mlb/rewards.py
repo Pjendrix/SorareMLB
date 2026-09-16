@@ -2,8 +2,9 @@
 
 Zdrojem je `rewardedRankings` (umístění, za která přišla odměna). Sorare
 u nich nevrací všechno — podle issue #670 v sorare/api chybí např. odměny
-za streaky. Proto se každé stažené umístění ukládá do archivu v Redisu
-a přehled se počítá z archivu; historie tak roste i mimo okno API.
+za streaky. Stažená umístění se ukládají do archivu v Redisu (po čtvrtletích, bez
+limitu) a přehled se počítá z archivu. Celou historii účtu stáhne
+`sync(full=True)` po dávkách.
 
 Přiřazení odměn kartám:
 * když položka odměny nese hráče (typicky Essence), jde přesně k němu,
@@ -12,81 +13,86 @@ Přiřazení odměn kartám:
 """
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 
+from .archive import Archive, paginate
 from .auth import token_status
 from .client import SorareClient
 from .features import get_features
 from .models import Config
 from .store import get_store
 
-# Jeden klíč na sport: hodnota v Upstash free smí mít max. 1 MB.
-K_ARCHIVE = "rewards:archive:{sport}"
-MAX_ARCHIVE = 500
 SPORT_ENUM = {"mlb": "BASEBALL", "football": "FOOTBALL"}
 ENUM_SPORT = {v: k for k, v in SPORT_ENUM.items()}
+ARCHIVE = Archive("rewards", "end")
 
 
 # ------------------------------------------------------------------ stažení
 
 
-def sync(config: Config, sport: str | None = None, max_pages: int | None = None) -> dict:
-    """Stáhne umístění s odměnou a přidá je do archivu."""
+def sync(config: Config, sport: str | None = None, full: bool = False) -> dict:
+    """Stáhne umístění s odměnou do archivu.
+
+    `full=True` stahuje celou historii účtu po dávkách (navazuje kurzorem);
+    volá se opakovaně, dokud výsledek nemá `done: true`.
+    """
     feats = get_features().get("rewards") or {}
     if not feats.get("available"):
         raise RuntimeError(feats.get("reason") or "Odměny nejsou ve schématu k dispozici.")
 
     client = SorareClient(config)
-    max_pages = max_pages or int(config.get_path("rewards.max_pages", 6))
     sports = [sport] if sport else list(SPORT_ENUM)
     if not feats.get("sport_arg"):
         sports = [None]
+    budget = float(config.get_path("rewards.budget_seconds", 40))
+    max_pages = int(config.get_path("rewards.max_pages", 6))
 
-    fetched = []
+    results = []
+    started = time.monotonic()
     for sp in sports:
-        cursor = None
-        for _ in range(max_pages):
+        def fetch_page(cursor, sp=sp):
             variables: dict = {"after": cursor}
             if sp and feats.get("sport_arg"):
                 variables["sport"] = [SPORT_ENUM[sp]] if feats.get("sport_is_list") else SPORT_ENUM[sp]
             if feats.get("needs_slug"):
                 variables["slug"] = token_status().get("user_slug")
             body = client.execute(feats["query"], variables, operation_name="RewardedRankings")
-            root = (body.get("data") or {}).get(feats["root_key"]) or {}
-            block = root.get("rewardedRankings") or {}
-            for raw in block.get("nodes") or []:
-                row = normalize(raw, default_sport=sp)
-                if row["id"]:
-                    fetched.append(row)
+            block = ((body.get("data") or {}).get(feats["root_key"]) or {}).get("rewardedRankings") or {}
+            rows = [normalize(raw, default_sport=sp) for raw in block.get("nodes") or []]
             page = block.get("pageInfo") or {}
-            if not page.get("hasNextPage"):
-                break
-            cursor = page.get("endCursor")
+            return [r for r in rows if r["id"]], page.get("endCursor") if page.get("hasNextPage") else None
 
-    merged = merge(fetched)
-    return {"fetched": len(fetched), "archived": len(merged)}
+        remaining = budget - (time.monotonic() - started)
+        if full and remaining <= 3:
+            results.append({"scope": sp or "all", "done": False, "fetched": 0, "new": 0, "pages": 0})
+            continue
+        results.append(paginate(fetch_page, ARCHIVE, sp or "all", full, remaining, max_pages))
+
+    return {
+        "done": all(r["done"] for r in results),
+        "fetched": sum(r["fetched"] for r in results),
+        "new": sum(r["new"] for r in results),
+        "scopes": results,
+    }
 
 
-def merge(rows: list[dict]) -> list[dict]:
-    store = get_store()
-    merged: list[dict] = []
-    for sport in {r["sport"] for r in rows}:
-        key = K_ARCHIVE.format(sport=sport)
-        current = {r["id"]: r for r in store.get_json(key, []) or []}
-        for r in rows:
-            if r["sport"] == sport:
-                current[r["id"]] = r
-        items = sorted(current.values(), key=lambda r: str(r.get("end") or ""), reverse=True)
-        store.set(key, items[:MAX_ARCHIVE])
-        merged += items[:MAX_ARCHIVE]
-    return merged
+def reset_backfill() -> None:
+    for scope in [*SPORT_ENUM, "all"]:
+        ARCHIVE.reset(scope)
+
+
+def backfill_status() -> dict:
+    return {scope: ARCHIVE.cursor_state(scope) for scope in [*SPORT_ENUM, "all"]}
 
 
 def archive(sport: str | None = None) -> list[dict]:
-    store = get_store()
-    keys = [sport] if sport else [*SPORT_ENUM, "?"]
-    rows = [r for k in keys for r in store.get_json(K_ARCHIVE.format(sport=k), []) or []]
-    return sorted(rows, key=lambda r: str(r.get("end") or ""), reverse=True)
+    rows = ARCHIVE.rows()
+    return [r for r in rows if not sport or r["sport"] == sport]
+
+
+def merge(rows: list[dict]) -> int:
+    return ARCHIVE.merge(rows)
 
 
 # ------------------------------------------------------------------ normalizace

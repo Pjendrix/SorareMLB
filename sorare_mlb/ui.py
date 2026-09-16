@@ -1,10 +1,13 @@
 """Stránky aplikace. Každá se renderuje jednou při startu funkce."""
 from .sports.football import FootballAdapter
-from .web import dashboard, football_lineups, history, mlb_lineups, rewards_page, settings, sport
+from .web import (
+    dashboard, football_lineups, history, ledger_page, mlb_lineups, rewards_page, settings, sport,
+)
 
 PAGES = {
     "/": dashboard.render(),
     "/vyhry": rewards_page.render(),
+    "/bilance": ledger_page.render(),
     "/mlb": sport.render(
         "mlb", "mlb", "MLB",
         "Sbírka baseballových karet, forma hráčů a otevřené turnaje.",
