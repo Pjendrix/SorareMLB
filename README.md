@@ -9,6 +9,7 @@ který skládá sestavy pro **Hot Streaks** a **Challenger**.
 |---|---|
 | `/` | Dashboard: nejbližší uzávěrky, co potřebuje pozornost, sbírky, stav automatu, poslední sestavy |
 | `/vyhry` | Peníze, Essence, karty a coiny: po soutěžích, gameweecích, kartách a hráčích |
+| `/bilance` | Vloženo, vybráno, utraceno za karty, prodeje, poplatky; po letech a měsících; ruční záznamy |
 | `/mlb`, `/fotbal` | Sbírka: rarity, pozice, forma (L5/L15, trend), karty bez zápasu, otevřené turnaje, filtr karet |
 | `/mlb/sestavy` | Builder sestav MLB (návrh, kontrola, odeslání) |
 | `/fotbal/sestavy` | Placeholder: plánovaný formát, otevřené turnaje, co zbývá |
@@ -46,6 +47,23 @@ Sorare u `rewardedRankings` nevrací všechno, např. odměny za streaky
 (issue #670 v sorare/api).
 
 Karty v trezoru se nepočítají do formy ani „leží ladem“ a automat je nepoužívá.
+
+### Celá historie účtu
+
+Výhry i platby se ukládají do archivu po čtvrtletích (bez limitu).
+Tlačítko „Stáhnout celou historii“ stahuje po dávkách (každá do 40 s,
+kvůli limitu Vercelu) a navazuje uloženým kurzorem, dokud nedojde na začátek účtu.
+
+### Bilance
+
+Zdroj plateb se hledá ve schématu (`features._ledger`), záznamy se třídí podle
+textu typu (`ledger.RULES`). Ukázku surových dat a přehled, jak se který typ
+zatřídil, vrací `/api/ledger/debug`. Co API nevrátí, se doplní ručně.
+
+### Heslo
+
+Aplikace ukazuje peníze. Nastav `APP_PASSWORD` a prohlížeč si heslo vyžádá
+(jméno libovolné). `/api/cron` a `/api/continue` mají vlastní secret.
 
 ### Nejisté části schématu
 
