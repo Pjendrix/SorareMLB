@@ -95,9 +95,38 @@ def test_archive_merges_by_id(monkeypatch, tmp_path):
 
     monkeypatch.setattr(store_mod, "LOCAL_FILE", tmp_path / "s.json")
     fake = store_mod.LocalStore()
-    monkeypatch.setattr(rewards, "get_store", lambda: fake)
+    import sorare_mlb.archive as archive_mod
+
+    monkeypatch.setattr(archive_mod, "get_store", lambda: fake)
     row = rewards.normalize(RAW)
-    rewards.merge([row])
-    rewards.merge([dict(row, score=500), dict(row, id="r3")])
+    assert rewards.merge([row]) == 1
+    assert rewards.merge([dict(row, score=500), dict(row, id="r3", end="2023-02-01")]) == 1
     rows = rewards.archive("football")
     assert len(rows) == 2 and {r["score"] for r in rows} == {500, 410.5}
+    assert rewards.ARCHIVE.shards() == ["2023Q1", "2026Q3"]
+
+
+def test_full_backfill_resumes_from_cursor(monkeypatch, tmp_path):
+    import sorare_mlb.archive as archive_mod
+    import sorare_mlb.store as store_mod
+    from sorare_mlb.archive import Archive, paginate
+
+    monkeypatch.setattr(store_mod, "LOCAL_FILE", tmp_path / "s.json")
+    fake = store_mod.LocalStore()
+    monkeypatch.setattr(archive_mod, "get_store", lambda: fake)
+    arch = Archive("t", "end")
+    pages = {None: "p1", "p1": "p2", "p2": None}
+    calls = []
+
+    def fetch(cursor):
+        calls.append(cursor)
+        return [{"id": f"{cursor}-{i}", "end": "2025-01-01"} for i in range(2)], pages[cursor]
+
+    # rozpočet 0 s → jedna stránka na volání
+    r1 = paginate(fetch, arch, "x", full=True, budget_seconds=0)
+    assert not r1["done"] and calls == [None]
+    paginate(fetch, arch, "x", full=True, budget_seconds=0)
+    r3 = paginate(fetch, arch, "x", full=True, budget_seconds=0)
+    assert r3["done"] and calls == [None, "p1", "p2"]
+    assert len(arch.rows()) == 6
+    assert paginate(fetch, arch, "x", full=True)["fetched"] == 0
