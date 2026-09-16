@@ -9,6 +9,7 @@ se do Redisu ukládají jen hotová rozhodnutí (`features`), ne schéma.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -40,6 +41,7 @@ class TypeDef:
 
 class Schema:
     def __init__(self, sdl: str):
+        self.size = len(sdl)
         self.types: dict[str, TypeDef] = {}
         self._parse(_strip_descriptions(sdl))
 
@@ -183,12 +185,26 @@ def _parse_fields(body: str) -> dict[str, FieldDef]:
 _cached: Schema | None = None
 
 
-def load_schema(sdl: str | None = None) -> Schema:
+def load_schema(sdl: str | None = None, fresh: bool = False) -> Schema:
     global _cached
     if sdl is not None:
         return Schema(sdl)
-    if _cached is None:
-        resp = requests.get(SDL_URL, timeout=60)
-        resp.raise_for_status()
-        _cached = Schema(resp.text)
+    if _cached is None or fresh:
+        headers = {"User-Agent": "sorare-mlb-app/1.0", "Accept": "text/plain, */*"}
+        api_key = os.environ.get("SORARE_API_KEY")
+        if api_key:
+            headers["APIKEY"] = api_key
+        resp = requests.get(SDL_URL, timeout=60, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code} z {SDL_URL}: {resp.text[:200]}")
+        text = resp.text
+        if "type " not in text[:200_000]:
+            raise RuntimeError(f"Odpověď nevypadá jako GraphQL schéma: {text[:200]!r}")
+        _cached = Schema(text)
+        _cached.size = len(text)
+        if not _cached.types.get("CurrentUser"):
+            raise RuntimeError(
+                f"Schéma se stáhlo ({len(text)} znaků, {len(_cached.types)} typů), "
+                "ale parser v něm nenašel typ CurrentUser."
+            )
     return _cached

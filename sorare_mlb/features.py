@@ -13,7 +13,11 @@ from .store import get_store
 
 log = logging.getLogger(__name__)
 
-K_FEATURES = "sorare:features:v1"
+# Při každé změně toho, co build_features vrací, zvýšit — jinak by se
+# 24 h používala stará uložená verze bez nových klíčů.
+FEATURES_VERSION = 3
+K_FEATURES = f"sorare:features:v{FEATURES_VERSION}"
+REQUIRED_KEYS = ("vault", "rewards", "ledger", "diagnostics")
 LEAF_BASES = {"Int", "Float", "String", "Boolean", "ID"}
 MONEY_FIELDS = ("eurCents", "usdCents", "gbpCents", "referenceCurrency")
 REWARD_LEAVES = ("quantity", "rarity", "coinAmount", "amount", "essenceAmount", "count", "xp", "points")
@@ -25,19 +29,22 @@ def get_features(refresh: bool = False, schema: Schema | None = None) -> dict:
     store = get_store()
     if not refresh and schema is None:
         cached = store.get_json(K_FEATURES)
-        if cached:
+        if cached and all(k in cached for k in REQUIRED_KEYS):
             return cached
     ttl = 24 * 3600
     try:
-        features = build_features(schema or load_schema())
+        features = build_features(schema or load_schema(fresh=refresh))
     except Exception as exc:  # noqa: BLE001
-        # Nedostupné schéma nesmí brzdit každé volání — zkusíme to za hodinu.
+        # Nedostupné schéma nesmí brzdit každé volání — zkusíme to za 10 minut.
         log.warning("Schéma Sorare nejde načíst: %s", exc)
+        reason = f"Schéma Sorare nejde stáhnout: {type(exc).__name__}: {exc}"[:400]
         features = {
             "vault": {},
-            "rewards": {"available": False, "reason": f"Schéma nejde stáhnout: {exc}"[:300]},
+            "rewards": {"available": False, "reason": reason},
+            "ledger": {"available": False, "reason": reason, "candidates": [], "sources": []},
+            "diagnostics": {"ok": False, "error": reason},
         }
-        ttl = 3600
+        ttl = 600
     try:
         store.set(K_FEATURES, features, ttl_seconds=ttl)
     except Exception:  # noqa: BLE001
@@ -47,9 +54,34 @@ def get_features(refresh: bool = False, schema: Schema | None = None) -> dict:
 
 def build_features(s: Schema) -> dict:
     return {
+        "version": FEATURES_VERSION,
         "vault": _vault(s),
         "rewards": _rewards(s),
         "ledger": _ledger(s),
+        "diagnostics": _diagnostics(s),
+    }
+
+
+DIAG_RX = r"reward|rank|account|payment|transaction|wallet|balance|deposit|withdraw|operation|activit|vault|seal"
+
+
+def _diagnostics(s: Schema) -> dict:
+    """Co ve schématu je — podle toho se dá doladit, když něco chybí."""
+    def names(type_name: str) -> list[str]:
+        return sorted(s.find(type_name, DIAG_RX))
+
+    card_type = s.node_type("CurrentUser", "cards") or "AnyCardInterface"
+    return {
+        "ok": True,
+        "sdl_bytes": getattr(s, "size", None),
+        "types": len(s.types),
+        "has_current_user": "CurrentUser" in s.types,
+        "current_user_fields": len((s.types.get("CurrentUser") or TypeDefStub).fields),
+        "current_user_matches": names("CurrentUser"),
+        "user_matches": names("User"),
+        "card_type": card_type,
+        "card_matches": names(card_type),
+        "query_matches": names("Query"),
     }
 
 
