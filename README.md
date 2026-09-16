@@ -187,8 +187,9 @@ pytest -q     # 47 testů (optimalizátor, pipeline, 2FA), žádná síť
    předem. Když to prošvihneš, sestavy se neodešlou.
 2. **Schéma Sorare API se mění.** `/api/schema?type=...` po každém delším výpadku.
 3. **Mapování pozic** v `config.yaml` → `lineup.slots`. Pozice jsou VELKÝMI
-   písmeny (`STARTING_PITCHER`, `FIRST_BASE`, …). Catchera řadím pod CI —
-   ověř si, že to Sorare dělá taky. Špatné mapování = prázdný slot a spadlý job.
+   písmeny a s prefixem sportu (`BASEBALL_STARTING_PITCHER`). Ověřeno proti
+   Sorare: CI = 1B/3B/DH, MI = 2B/SS/**C**. Špatné mapování projde
+   optimalizátorem a spadne až při odeslání.
 4. **Párování jmen** Sorare ↔ MLB jede přes normalizované jméno. Duplicity
    (Luis García) doplň do `mlb.manual_player_map`.
 5. **Projekce nejsou edge.** Bez placeného zdroje jde o formu + matchup.
