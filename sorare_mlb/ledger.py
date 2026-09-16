@@ -19,7 +19,9 @@ from .features import get_features
 from .models import Config
 from .store import get_store
 
-ARCHIVE = Archive("ledger", "date")
+# „ledger2“: záznamy z první verze měly chybně přečtené částky a data,
+# nový prefix je zahodí a historie se stáhne znovu.
+ARCHIVE = Archive("ledger2", "date")
 K_MANUAL = "ledger:manual"
 K_BALANCE = "ledger:balance"
 K_SAMPLE = "ledger:sample"
@@ -29,6 +31,7 @@ CATEGORIES = {
     "card_payment": "Platba kartou",
     "withdrawal": "Výběr",
     "purchase": "Nákup karet",
+    "pack": "Balíček za gemy",
     "sale": "Prodej karet",
     "reward": "Výhra",
     "fee": "Poplatek",
@@ -45,9 +48,9 @@ RULES = [
     ("fee", r"fee|commission|gas"),
     ("withdrawal", r"withdraw|payout|cash_?out|transfer_?out"),
     ("deposit", r"deposit|top_?up|funding|pay_?in|transfer_?in|credit_?card_?payment"),
+    ("reward", r"reward|prize|referral|bonus|mission|quest|achievement|cashback|streak"),
     ("sale", r"sale|sell|sold|offer_?accepted_?by_?buyer"),
     ("purchase", r"buy|bought|purchase|bid|auction|pack|shop|acqui|primary|offer"),
-    ("reward", r"reward|prize|referral|bonus"),
 ]
 
 
@@ -81,43 +84,94 @@ def _num(value) -> float | None:
         return None
 
 
+DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}")
+DATE_KEY_RX = re.compile(r"(At|Date|^date|^time|timestamp)$", re.I)
+TYPE_KEY_RX = re.compile(r"typename|type$|kind|direction|reason|label|description|title|name$", re.I)
+IN_GAME_RX = re.compile(r"gem|coin|in_?game|shard|essence|credit", re.I)
+FIAT = {"EUR": "eur", "USD": "usd", "GBP": "gbp"}
+
+
+def _date(flat: dict) -> str | None:
+    # Jen skutečná data — pole jako `isUpdatable` obsahují „date“, ale nesou True/False.
+    candidates = [
+        (k, v) for k, v in flat.items()
+        if isinstance(v, str) and DATE_RX.match(v) and DATE_KEY_RX.search(k.split(".")[-1])
+    ]
+    candidates.sort(key=lambda kv: (not re.search(r"created|occurred|paid|executed", kv[0], re.I), kv[0]))
+    return candidates[0][1][:19] if candidates else None
+
+
+def _money_groups(flat: dict) -> dict[str, dict]:
+    """Seskupí listová pole podle objektu (`amounts.eurCents` → skupina `amounts`)."""
+    groups: dict[str, dict] = defaultdict(dict)
+    for k, v in flat.items():
+        prefix, _, leaf = k.rpartition(".")
+        groups[prefix][leaf] = v
+    return groups
+
+
+def _amounts(flat: dict, type_text: str) -> dict:
+    """Vrátí {eur, usd, eth, in_game, currency} pro jeden záznam.
+
+    Sorare u částky vrací ekvivalent ve více měnách (eurCents, usdCents,
+    wei) a `referenceCurrency` říká, ve které se opravdu platilo. Do součtů
+    v eurech jde vždy eurový ekvivalent — nesčítá se EUR + USD.
+    """
+    out = {"eur": None, "usd": None, "eth": None, "in_game": None, "currency": None}
+    for prefix, g in _money_groups(flat).items():
+        keys = {k.lower(): k for k in g}
+        if not any(x in keys for x in ("eurcents", "usdcents", "gbpcents", "wei")):
+            continue
+        ref = str(g.get(keys.get("referencecurrency", ""), "") or "").upper() or None
+        if out["eur"] is None and _num(g.get(keys.get("eurcents"))) is not None:
+            out["eur"] = _num(g[keys["eurcents"]]) / 100
+        if out["usd"] is None and _num(g.get(keys.get("usdcents"))) is not None:
+            out["usd"] = _num(g[keys["usdcents"]]) / 100
+        if _num(g.get(keys.get("wei"))) is not None and (ref in (None, "ETH", "WEI") or out["eur"] is None):
+            out["eth"] = _num(g[keys["wei"]]) / 1e18
+        out["currency"] = out["currency"] or ref
+    if any(out[k] is not None for k in ("eur", "usd", "eth")):
+        if out["currency"] and out["currency"] not in ("ETH", "WEI"):
+            out["eth"] = None                     # wei je jen přepočet
+        return out
+
+    # Volná částka bez objektu (např. platební záměry).
+    currency = str(next(
+        (v for k, v in flat.items() if re.search(r"currency|unit|method", k, re.I) and v), ""
+    ) or "").upper()
+    amount_key, amount = next(
+        ((k, _num(v)) for k, v in flat.items()
+         if re.search(r"amount|value|price|total", k.split(".")[-1], re.I)
+         and not isinstance(v, bool) and _num(v) is not None),
+        (None, None),
+    )
+    if amount is None:
+        return out
+    out["currency"] = currency or None
+    if IN_GAME_RX.search(currency):
+        out["in_game"] = amount
+    elif amount_key and "wei" in amount_key.lower() or currency in ("ETH", "WEI") or abs(amount) >= 1e12:
+        # Celá čísla řádu 10^15+ jsou wei (1 ETH = 10^18 wei).
+        out["eth"] = amount / 1e18 if abs(amount) >= 1e9 else amount
+    else:
+        if amount_key and "cents" in amount_key.lower():
+            amount /= 100
+        out[FIAT.get(currency, "eur")] = amount
+    return out
+
+
 def normalize(node: dict, source: str, role: str | None = None) -> dict:
     flat = _flatten(node)
-    date_value = next(
-        (v for k, v in flat.items() if re.search(r"At$|date", k.split(".")[-1], re.I) and v), None
-    )
     type_text = " ".join(
         str(v) for k, v in flat.items()
-        if re.search(r"typename|type|kind|direction|reason|label|description", k, re.I) and v
+        if TYPE_KEY_RX.search(k.split(".")[-1]) and isinstance(v, str) and v
+    ).strip()
+    sign_hint = " ".join(
+        str(v) for k, v in flat.items()
+        if re.search(r"sign|direction|debit|credit", k, re.I) and not isinstance(v, bool)
     )
-
-    eur = usd = eth = None
-    for k, v in flat.items():
-        leaf = k.split(".")[-1].lower()
-        if leaf == "eurcents":
-            eur = (eur or 0) + (_num(v) or 0) / 100
-        elif leaf == "usdcents":
-            usd = (usd or 0) + (_num(v) or 0) / 100
-        elif leaf == "wei":
-            eth = (eth or 0) + (_num(v) or 0) / 1e18
-    if eur is None and usd is None and eth is None:
-        currency = str(next((v for k, v in flat.items() if "currency" in k.lower()), "") or "").upper()
-        amount = next(
-            (_num(v) for k, v in flat.items()
-             if re.search(r"amount|value|price", k, re.I) and _num(v) is not None), None
-        )
-        if amount is not None:
-            if "cents" in type_text.lower() or any("cents" in k.lower() for k in flat):
-                amount /= 100
-            if currency in ("USD",):
-                usd = amount
-            elif currency in ("ETH", "WEI"):
-                eth = amount / 1e18 if currency == "WEI" else amount
-            else:
-                eur = amount
-
-    sign_hint = " ".join(str(v) for k, v in flat.items() if re.search(r"sign|direction|debit|credit", k, re.I))
-    category = role or classify(type_text + " " + sign_hint, eur or usd or eth or 0)
+    money = _amounts(flat, type_text)
+    category = role or classify(type_text + " " + sign_hint, 0)
 
     qty = None
     if category in QUANTITY:
@@ -125,27 +179,42 @@ def normalize(node: dict, source: str, role: str | None = None) -> dict:
         qty = next(
             (_num(v) for k, v in flat.items()
              if re.search(r"quantity|amount|count|delta|value", k.split(".")[-1], re.I)
-             and _num(v) is not None),
+             and not isinstance(v, bool) and _num(v) is not None),
             None,
         )
         if qty is not None and re.search(r"spend|spent|burn|debit|used|consum|out", type_text + " " + sign_hint, re.I):
             qty = -abs(qty)
-        eur = usd = eth = None
+        money = {"eur": None, "usd": None, "eth": None, "in_game": None, "currency": None}
+    elif category == "purchase" and (
+        IN_GAME_RX.search(str(money["currency"] or "")) or re.search(r"^pack\b", type_text, re.I)
+    ):
+        # Balíčky se kupují za gemy — v eurech je jen orientační ekvivalent,
+        # peníze za gemy už jsou v platbách kartou / vkladech.
+        category = "pack"
 
     return {
         "id": f"{source}:{flat.get('id') or uuid.uuid5(uuid.NAMESPACE_OID, str(sorted(flat.items())))}",
         "source": source,
-        "date": str(date_value or "")[:19] or None,
-        "type": type_text.strip()[:80] or None,
+        "date": _date(flat),
+        "type": type_text[:80] or None,
         "category": category,
-        "eur": _abs(eur),
-        "usd": _abs(usd),
-        "eth": _abs(eth),
+        "eur": _abs(money["eur"]),
+        "usd": _abs(money["usd"]),
+        "eth": _abs(money["eth"]),
+        "in_game": _abs(money["in_game"]),
+        "currency": money["currency"],
         "status": flat.get("status"),
         "role": role,
         "qty": qty,
         "rarity": str(flat.get("rarity") or "").lower() or None,
     }
+
+
+def _eur_value(r: dict) -> float:
+    """Eurová hodnota záznamu; USD jen když eurový ekvivalent chybí (1:1)."""
+    if r.get("eur") is not None:
+        return r["eur"]
+    return r.get("usd") or 0.0
 
 
 def _abs(value):
@@ -294,15 +363,22 @@ def summarize(rows: list[dict], reward_money_eur: float = 0.0, exclude_failed: b
             continue
         t = totals[cat]
         t["count"] += 1
-        for cur in ("eur", "usd", "eth"):
-            t[cur] += r.get(cur) or 0
+        value = _eur_value(r)
+        t["eur"] += value
+        t["usd"] += 0 if r.get("eur") is not None else (r.get("usd") or 0)
+        if r.get("eur") is None and r.get("usd") is None:
+            t["eth"] += r.get("eth") or 0
+        t["in_game"] = t.get("in_game", 0) + (r.get("in_game") or 0)
         period = str(r.get("date") or "")
         if len(period) >= 7:
-            by_year[period[:4]][cat] += r.get("eur") or r.get("usd") or 0
-            by_month[period[:7]][cat] += r.get("eur") or r.get("usd") or 0
+            by_year[period[:4]][cat] += value
+            by_month[period[:7]][cat] += value
 
     def eur(c):
-        return round(totals[c]["eur"] + totals[c]["usd"], 2)  # USD bereme 1:1 jen pro hrubý přehled
+        return round(totals[c]["eur"], 2)
+
+    def eth(c):
+        return round(totals[c]["eth"], 6)
 
     invested = eur("deposit") + eur("card_payment")
     balance = get_store().get_json(K_BALANCE)
@@ -321,7 +397,11 @@ def summarize(rows: list[dict], reward_money_eur: float = 0.0, exclude_failed: b
             eur("sale") - eur("purchase") - eur("card_payment") - eur("fee") + eur("refund"), 2
         ),
         "has_usd": any(totals[c]["usd"] for c in totals),
-        "eth": {c: round(totals[c]["eth"], 6) for c in totals if totals[c]["eth"]},
+        # Částky jen v ETH (bez eurového ekvivalentu) — do eur se nepřepočítávají.
+        "eth": {c: eth(c) for c in totals if totals[c]["eth"]},
+        "card_payments_eth": eth("card_payment"),
+        "packs_eur_equiv": eur("pack"),
+        "packs_count": totals["pack"]["count"],
         "skipped_duplicates": duplicates,
     }
     return {

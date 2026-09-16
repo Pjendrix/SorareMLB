@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 # Při každé změně toho, co build_features vrací, zvýšit — jinak by se
 # 24 h používala stará uložená verze bez nových klíčů.
-FEATURES_VERSION = 4
+FEATURES_VERSION = 5
 K_FEATURES = f"sorare:features:v{FEATURES_VERSION}"
 REQUIRED_KEYS = ("vault", "rewards", "ledger", "diagnostics")
 LEAF_BASES = {"Int", "Float", "String", "Boolean", "ID"}
@@ -253,7 +253,9 @@ def _rewards(s: Schema) -> dict:
         args.append("sport: $sport")
     var_defs = ["$after: String"]
     if has_sport:
-        sport_arg_type = conn.arg_types.get("sport", "Sport").rstrip("!")
+        # Typ proměnné musí přesně odpovídat argumentu (včetně „!“),
+        # jinak Sorare dotaz odmítne jako nevalidní.
+        sport_arg_type = conn.arg_types.get("sport", "Sport")
         var_defs.append(f"$sport: {sport_arg_type}")
     if root[1].startswith("user("):
         var_defs.append("$slug: String!")
