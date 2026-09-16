@@ -138,3 +138,29 @@ def test_execute_first_ok_falls_back():
 def test_football_lineups_not_supported():
     with pytest.raises(NotSupported):
         get_adapter("football").build_lineups()
+
+
+def test_vault_cards_leave_form_lists():
+    card = card_from_dict(dict(node("safe", "FORWARD", [50] * 10, 1), vaultFlag=True))
+    active = card_from_dict(node("act", "FORWARD", [40] * 10, 1))
+    s = FootballAdapter().summarize([card, active], Config({}), today=TODAY)
+    assert s["count"] == 1 and s["vault_count"] == 1
+    assert s["vault"][0]["player"] == "Safe"
+
+
+def test_upcoming_counts_ongoing_lineups_and_filters_rarity(monkeypatch):
+    class Client(FakeClient):
+        def fetch_all_upcoming(self, cache_seconds=0):
+            boards = super().fetch_all_upcoming()
+            boards[1] = dict(boards[1], mySo5LineupsCount=0)
+            boards.append(dict(boards[1], slug="gw9-rare", rarityType="rare"))
+            return boards
+
+        def fetch_recent_lineups(self, cache_seconds=600):
+            return {"lineups": [{"so5Leaderboard": {"slug": "gw9-cap"}}] * 2}
+
+    monkeypatch.setattr(overview, "SorareClient", Client)
+    config = Config({"sports": {"football": {"board_rarities": ["limited"]}}})
+    up = overview.upcoming(config)
+    assert [b["slug"] for b in up["boards"]["football"]] == ["gw9-cap"]
+    assert up["boards"]["football"][0]["mine"] == 2
