@@ -130,3 +130,34 @@ def test_full_backfill_resumes_from_cursor(monkeypatch, tmp_path):
     assert r3["done"] and calls == [None, "p1", "p2"]
     assert len(arch.rows()) == 6
     assert paginate(fetch, arch, "x", full=True)["fetched"] == 0
+
+
+def test_stale_feature_cache_is_rebuilt(monkeypatch, tmp_path):
+    import sorare_mlb.features as feat_mod
+    import sorare_mlb.store as store_mod
+
+    monkeypatch.setattr(store_mod, "LOCAL_FILE", tmp_path / "s.json")
+    fake = store_mod.LocalStore()
+    monkeypatch.setattr(feat_mod, "get_store", lambda: fake)
+    monkeypatch.setattr(feat_mod, "load_schema", lambda fresh=False: Schema(SDL))
+    # stará uložená verze bez klíče ledger
+    fake.set(feat_mod.K_FEATURES, {"vault": {}, "rewards": {"available": False}})
+    feats = feat_mod.get_features()
+    assert feats["ledger"]["available"] and feats["rewards"]["available"]
+    assert feats["diagnostics"]["has_current_user"]
+
+
+def test_schema_download_failure_explains_itself(monkeypatch, tmp_path):
+    import sorare_mlb.features as feat_mod
+    import sorare_mlb.store as store_mod
+
+    monkeypatch.setattr(store_mod, "LOCAL_FILE", tmp_path / "s.json")
+    fake = store_mod.LocalStore()
+    monkeypatch.setattr(feat_mod, "get_store", lambda: fake)
+
+    def boom(fresh=False):
+        raise RuntimeError("HTTP 403")
+
+    monkeypatch.setattr(feat_mod, "load_schema", boom)
+    feats = feat_mod.get_features()
+    assert "HTTP 403" in feats["ledger"]["reason"] and "HTTP 403" in feats["rewards"]["reason"]
