@@ -78,7 +78,9 @@ const yes = (v) => `<span class="state ${v ? "on" : ""}">${v ? "Nastaveno" : "Ch
     el.innerHTML = `<table><tbody>
       <tr><td>Příznak trezoru</td><td>${f.vault_field ? `<span class="state on"><code>${esc(f.vault_field)}</code></span>` : `<span class="state">Nenalezen</span>`}</td></tr>
       <tr><td>Výhry (rewardedRankings)</td><td>${f.rewards_available ? `<span class="state on">Dostupné</span>` : `<span class="state stop">${esc(f.rewards_reason)}</span>`}</td></tr>
+      <tr><td>Historie plateb</td><td>${f.ledger_available ? `<span class="state on">${f.ledger_sources.map(esc).join(", ")}</span>` : `<span class="state stop">${esc(f.ledger_reason)}</span>`}</td></tr>
       </tbody></table>
+      <p class="muted">Ukázka surových plateb pro doladění: <code>/api/ledger/debug</code></p>
       <p><button class="btn" id="schema-refresh">Načíst schéma znovu</button></p>`;
     $("#schema-refresh").onclick = async () => { await api("/api/schema-features?refresh=1"); location.reload(); };
   } catch (e) { failed($("#schema"), e); }

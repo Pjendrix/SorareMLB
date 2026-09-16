@@ -12,6 +12,7 @@ from html import escape
 NAV = [
     ("dashboard", "/", "Přehled"),
     ("rewards", "/vyhry", "Výhry"),
+    ("ledger", "/bilance", "Bilance"),
     ("mlb", "/mlb", "MLB"),
     ("mlb-lineups", "/mlb/sestavy", "Sestavy MLB"),
     ("mlb-history", "/mlb/historie", "Historie MLB"),
@@ -181,8 +182,9 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&
 const num = (v, d = 0) => v == null || isNaN(v) ? "—" : Number(v).toLocaleString("cs-CZ", {maximumFractionDigits: d, minimumFractionDigits: d});
 
 async function api(url, opts = {}) {
-  const r = await fetch(url, opts.body ? {
-    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(opts.body)
+  const r = await fetch(url, opts.body || opts.method ? {
+    method: opts.method || "POST", headers: {"Content-Type": "application/json"},
+    body: opts.body ? JSON.stringify(opts.body) : undefined
   } : {});
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -267,6 +269,7 @@ def page(title: str, active: str, body: str, script: str = "", charts: bool = Fa
   <main>{body}</main>
 </div>
 <script>{JS}
+{JS_BACKFILL}
 (async () => {{
   try {{
     const a = await api("/api/auth/status");
@@ -279,3 +282,28 @@ def page(title: str, active: str, body: str, script: str = "", charts: bool = Fa
 <script>{script}</script>
 </body>
 </html>"""
+
+
+JS_BACKFILL = r"""
+async function runBackfill(url, button, status, reset) {
+  button.disabled = true;
+  let total = 0, round = 0, body = reset ? {reset: true, full: true} : {full: true};
+  try {
+    while (true) {
+      round += 1;
+      status.textContent = `Stahuji historii, dávka ${round}, zatím ${total} nových záznamů…`;
+      const r = await api(url, {body});
+      total += r.new || 0;
+      body = {full: true};
+      const err = (r.scopes || []).find(s => s.error);
+      if (err) status.textContent = `Zdroj ${err.scope} selhal: ${err.error}`;
+      if (r.done) break;
+    }
+    status.textContent = `Hotovo, staženo ${total} nových záznamů.`;
+    return true;
+  } catch (e) {
+    status.textContent = "Stahování se zastavilo: " + e.message + ". Kliknutím navážeš.";
+    return false;
+  } finally { button.disabled = false; }
+}
+"""

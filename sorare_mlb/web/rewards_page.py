@@ -10,7 +10,10 @@ BODY = """
     <button class="btn" data-sport="mlb" aria-pressed="false">MLB</button>
     <button class="btn" data-sport="football" aria-pressed="false">Fotbal</button>
     <button class="btn" id="sync">Stáhnout nové výhry</button>
-    <span class="muted small" id="stamp"></span>
+    <button class="btn" id="full">Stáhnout celou historii</button>
+  </div>
+  <p class="muted" id="stamp"></p>
+  <div class="row">
   </div>
 </div>
 
@@ -96,7 +99,16 @@ function itemText(i) {
 
 function render(d) {
   const t = d.totals;
-  $("#stamp").textContent = d.sync ? `Staženo ${d.sync.fetched} umístění` : "";
+  const bf = Object.values(d.backfill || {});
+  const complete = bf.some(b => b && b.done);
+  const oldest = d.game_weeks.length ? d.game_weeks.find(g => g.game_week != null) : null;
+  $("#stamp").textContent = [
+    d.sync ? `Staženo ${d.sync.fetched} umístění, nových ${d.sync.new}.` : "",
+    complete ? "Archiv obsahuje celou historii účtu." : "Archiv zatím nemá celou historii, spusť „Stáhnout celou historii“.",
+    oldest ? `Nejstarší GW v archivu: ${oldest.game_week}.` : "",
+  ].filter(Boolean).join(" ");
+  $("#full").textContent = complete ? "Stáhnout historii znovu" : "Stáhnout celou historii";
+  $("#full").dataset.reset = complete ? "1" : "";
   $("#totals").innerHTML =
     cell("Peníze", eur(t.money)) +
     cell("Essence", ess(t.essence)) +
@@ -177,6 +189,10 @@ document.querySelectorAll("[data-sport]").forEach(b => b.onclick = () => {
   load(false);
 });
 $("#sync").onclick = () => load(true);
+$("#full").onclick = async () => {
+  await runBackfill("/api/rewards/backfill", $("#full"), $("#stamp"), $("#full").dataset.reset === "1");
+  load(false);
+};
 load(false);
 """
 
