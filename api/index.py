@@ -208,6 +208,41 @@ def _visible_rewards(config, sport: str | None = None) -> list[dict]:
     ]
 
 
+@app.get("/api/rewards/debug")
+def api_rewards_debug() -> JSONResponse:
+    """Jedna stránka výher pro každý sport: chyba nebo ukázka syrových dat."""
+    from sorare_mlb import rewards
+    from sorare_mlb.client import SorareClient
+    from sorare_mlb.features import get_features
+
+    _require_auth()
+    feats = get_features().get("rewards") or {}
+    out = {"available": feats.get("available"), "reason": feats.get("reason"), "sports": {}}
+    if not feats.get("available"):
+        return JSONResponse(out)
+    client = SorareClient(_config())
+    for sp, enum in rewards.SPORT_ENUM.items():
+        variables: dict = {"after": None}
+        if feats.get("sport_arg"):
+            variables["sport"] = [enum] if feats.get("sport_is_list") else enum
+        try:
+            body = client.execute(feats["query"], variables, operation_name="RewardedRankings",
+                                  tolerate_errors=True)
+            block = ((body.get("data") or {}).get(feats["root_key"]) or {}).get("rewardedRankings") or {}
+            nodes = block.get("nodes") or []
+            out["sports"][sp] = {
+                "errors": [e.get("message") for e in body.get("errors") or []][:5],
+                "count_on_page": len(nodes),
+                "has_next": (block.get("pageInfo") or {}).get("hasNextPage"),
+                "sample": nodes[:1],
+                "normalized": rewards.normalize(nodes[0], sp) if nodes else None,
+            }
+        except Exception as exc:  # noqa: BLE001
+            out["sports"][sp] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+    out["archived"] = len(rewards.archive())
+    return JSONResponse(out)
+
+
 @app.post("/api/rewards/backfill")
 def api_rewards_backfill(payload: dict | None = None) -> JSONResponse:
     """Jedna dávka stahování celé historie výher. Volej, dokud `done` není true."""
