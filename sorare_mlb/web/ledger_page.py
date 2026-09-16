@@ -19,8 +19,18 @@ BODY = """
 
 <section>
   <h2 class="label">Pohyby</h2>
-  <div class="grid g4" id="flows"></div>
+  <div class="grid g5" id="flows"></div>
   <p class="muted" id="notes"></p>
+</section>
+
+<section id="qty-wrap" hidden>
+  <div class="split">
+    <div>
+      <h2 class="label">Essence a gemy</h2>
+      <p class="muted">Z historie transakcí, v kusech.</p>
+    </div>
+    <div class="grid g2" id="qty"></div>
+  </div>
 </section>
 
 <section>
@@ -97,17 +107,25 @@ function render(d) {
     : `Zdroj: ${d.sources.join(", ")}. ${d.count} záznamů${d.first_date ? `, nejstarší ${day(d.first_date)}` : ""}.`;
 
   $("#result").innerHTML =
-    cell("Hotovost", signed(h.cash_result), "vybráno minus vloženo") +
+    cell("Hotovost", signed(h.cash_result), `vybráno minus vloženo celkem (${money(h.invested)})`) +
     cell("Trh s kartami", signed(h.market_result), "prodeje minus nákupy a poplatky") +
     cell("Výhry v penězích", money(h.rewards_money), "ze stránky Výhry");
 
   $("#flows").innerHTML =
-    cell("Vloženo", money(h.deposited)) +
+    cell("Vklady do peněženky", money(h.deposited)) +
+    cell("Platby kartou", money(h.card_payments), "nákupy placené přímo kartou") +
     cell("Vybráno", money(h.withdrawn)) +
-    cell("Utraceno za karty", money(h.spent)) +
+    cell("Utraceno za karty", money(h.spent), "z peněženky i kartou") +
     cell("Prodeje karet", money(h.sold));
 
+  const q = d.quantities || {};
+  const qk = Object.keys(q).filter(k => q[k].count);
+  $("#qty-wrap").hidden = !qk.length;
+  $("#qty").innerHTML = qk.map(k => `<div class="cell"><div class="label">${esc(d.categories_map[k])}</div>
+    <div class="big">+${num(q[k].gained)}</div><p class="muted">získáno, utraceno ${num(q[k].spent)}, ${q[k].count} transakcí</p></div>`).join("");
+
   const notes = [];
+  if (h.skipped_duplicates) notes.push(`${h.skipped_duplicates} výběrů ze specializovaného zdroje vynecháno, protože už jsou ve výpisu účtu.`);
   if (h.fees) notes.push(`Poplatky ${money(h.fees)}.`);
   if (h.refunds) notes.push(`Vrácení ${money(h.refunds)}.`);
   if (h.has_usd) notes.push("Část plateb je v USD, v součtech je počítaná 1:1 s eurem.");
@@ -116,7 +134,7 @@ function render(d) {
   if (bal.length) notes.push("Zůstatek podle Sorare: " + bal.map(([k, v]) => `${esc(k)} ${esc(v)}`).join(", ") + ".");
   $("#notes").textContent = notes.join(" ");
 
-  const cols = ["deposit", "withdrawal", "purchase", "sale", "fee"];
+  const cols = ["deposit", "card_payment", "withdrawal", "purchase", "sale", "fee"];
   $("#years").innerHTML = d.years.length ? `<table><thead><tr><th>Rok</th>${cols.map(c => `<th class="num">${esc(d.categories_map[c])}</th>`).join("")}</tr></thead><tbody>
     ${d.years.map(y => `<tr><td>${esc(y.year)}</td>${cols.map(c => `<td class="num">${money(y[c])}</td>`).join("")}</tr>`).join("")}</tbody></table>`
     : `<div class="empty">Žádné pohyby.</div>`;
@@ -125,7 +143,7 @@ function render(d) {
   if (cat.options.length === 1) {
     for (const [k, v] of Object.entries(d.categories_map)) {
       cat.insertAdjacentHTML("beforeend", `<option value="${k}">${esc(v)}</option>`);
-      mcat.insertAdjacentHTML("beforeend", `<option value="${k}">${esc(v)}</option>`);
+      if (k !== "essence" && k !== "gems") mcat.insertAdjacentHTML("beforeend", `<option value="${k}">${esc(v)}</option>`);
     }
   }
   renderEntries();
@@ -142,7 +160,7 @@ function render(d) {
     chartRef = new Chart($("#chart"), {
       type: "line",
       data: {labels: months.map(m => m.month), datasets: [
-        line("Vklady", "deposit", []), line("Výběry", "withdrawal", [6, 4]), line("Nákupy", "purchase", [1, 3])]},
+        line("Vklady", "deposit", []), line("Výběry", "withdrawal", [6, 4]), {...line("Nákupy", "purchase", [1, 3]), data: months.map(m => (m.purchase || 0) + (m.card_payment || 0))}]},
       options: {responsive: true, maintainAspectRatio: false, interaction: {mode: "index", intersect: false},
         plugins: {legend: {labels: {boxWidth: 18, boxHeight: 1}}},
         scales: {x: {grid: {color: "#e5e4e0"}}, y: {grid: {color: "#e5e4e0"}, title: {display: true, text: "€"}}}}
@@ -157,7 +175,7 @@ function renderEntries() {
     <th class="num">Částka</th><th>Stav</th><th></th></tr></thead><tbody>
     ${rows.map(e => `<tr><td>${day(e.date)}</td><td>${esc(DATA.categories_map[e.category])}</td>
       <td class="muted">${esc(e.type || "—")}</td>
-      <td class="num">${e.eur ? money(e.eur) : e.usd ? num(e.usd, 2) + " $" : e.eth ? num(e.eth, 4) + " ETH" : "—"}</td>
+      <td class="num">${e.qty != null ? (e.qty > 0 ? "+" : "") + num(e.qty) + " ks" : e.eur ? money(e.eur) : e.usd ? num(e.usd, 2) + " $" : e.eth ? num(e.eth, 4) + " ETH" : "—"}</td>
       <td class="muted">${esc(e.status || "")}</td>
       <td>${e.source === "manual" ? `<button class="btn" data-del="${esc(e.id)}">Smazat</button>` : ""}</td></tr>`).join("")}
     </tbody></table>${DATA.count > DATA.entries.length ? `<p class="muted">Zobrazeno posledních ${DATA.entries.length} z ${DATA.count}.</p>` : ""}`
