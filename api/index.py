@@ -149,7 +149,8 @@ def _sorare_call(fn, *args, **kwargs):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"{type(exc).__name__}: {exc}"[:500]) from exc
+        name = "" if isinstance(exc, RuntimeError) else f"{type(exc).__name__}: "
+        raise HTTPException(502, f"{name}{exc}"[:500]) from exc
 
 
 @app.get("/api/dashboard")
@@ -313,6 +314,8 @@ def api_schema_features(refresh: bool = False) -> JSONResponse:
             "ledger_available": (feats.get("ledger") or {}).get("available", False),
             "ledger_sources": [x["field"] for x in (feats.get("ledger") or {}).get("sources") or []],
             "ledger_reason": (feats.get("ledger") or {}).get("reason"),
+            "ledger_candidates": (feats.get("ledger") or {}).get("candidates"),
+            "diagnostics": feats.get("diagnostics"),
         }
     )
 
