@@ -182,25 +182,23 @@ def _step_cards(job: Job, config: Config, deadline: float) -> None:
 
     # Kdo v tomhle gameweeku startuje. Ptáme se lavičky konkrétního
     # leaderboardu, jinak bychom dostali nejbližší zápas mimo gameweek.
-    if job.leaderboards:
-        # Zkusíme leaderboardy, na které opravdu skládáme — první v seznamu
-        # může být turnaj, který vůbec nehrajeme.
-        for board in job.leaderboards:
-            starters, error = client.fetch_probable_starters(board["slug"])
-            if starters:
-                job.probable_starters = sorted(starters)
-                job.starters_known = True
-                job.log_step(
-                    f"Startující nadhazovači podle Sorare: {len(starters)} "
-                    f"(leaderboard {board['slug']})"
-                )
-                break
-            job.log_step(f"Startéři z {board['slug']}: {error}")
+    # Kdo v tomhle gameweeku startuje. Ptáme se zápasů fixture — lavička
+    # bez kontextu sestavy vrací prázdno a `nextGame` míří mimo gameweek.
+    fixture_slug = (job.fixture or {}).get("slug")
+    if fixture_slug:
+        starters, error = client.fetch_probable_starters(fixture_slug)
+        if starters:
+            job.probable_starters = sorted(starters)
+            job.starters_known = True
+            job.log_step(f"Ohlášení startéři podle Sorare: {len(starters)}")
         else:
             job.log_step(
-                "VAROVÁNÍ: startéry se zjistit nepovedlo — nadhazovači se "
-                "vybírají jen podle formy a MLB probables"
+                f"VAROVÁNÍ: startéry se zjistit nepovedlo ({error}) — "
+                "nadhazovači se vybírají jen podle formy a MLB probables"
             )
+    else:
+        job.log_step("VAROVÁNÍ: neznám slug fixture, startéry nezjistím")
+
     job.state = "MLB"
 
 

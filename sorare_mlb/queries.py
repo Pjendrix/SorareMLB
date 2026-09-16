@@ -108,31 +108,34 @@ mutation CreateOrUpdateSo5Lineup($input: createOrUpdateSo5LineupInput!) {
 # jako pole, ale dá se na ni filtrovat — a protože je lavička navázaná na
 # konkrétní leaderboard, sedí to na správný gameweek. (`nextGame` na hráči
 # vrací nejbližší zápas vůbec, což u vícedenního gameweeku ukazuje jinam.)
+# Ohlášení startující nadhazovači pro celý gameweek.
+#
+# Bere se to ze zápasů fixture, ne z hráče ani z lavičky:
+#   * `nextGame` na hráči vrací nejbližší zápas vůbec, klidně mimo gameweek
+#     (Yamamoto startoval 16. 9., zatímco gameweek byl 19.–21. 9.),
+#   * `myFilteredBench` vrací prázdno bez kontextu skládané sestavy.
+# `anyGames` je rozhraní, takže jde použít fragment na GameOfBaseball.
 PROBABLE_STARTERS = """
-query ProbableStarters($slug: String!, $minOdds: Int!, $after: String) {
+query FixtureProbablePitchers($slug: String!) {
   so5 {
-    so5Leaderboard(slug: $slug) {
+    so5Fixture(slug: $slug) {
       slug
-      myFilteredBench(
-        filters: {
-          starterOddsBasisPointsRange: { min: $minOdds }
-          includeNoGame: false
-          includeUsed: true
-        }
-        first: 50
-        after: $after
-      ) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
+      startDate
+      endDate
+      anyGames {
+        ... on GameOfBaseball {
           id
-          anyPlayer { slug displayName }
+          date
+          probablePitchers {
+            slug
+            displayName
+          }
         }
       }
     }
   }
 }
 """
-
 
 # Diagnostická varianta: filtry se předávají jako proměnná, takže jde
 # vyzkoušet, který z nich lavičku vyprázdní.

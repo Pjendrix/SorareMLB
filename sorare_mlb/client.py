@@ -150,52 +150,40 @@ class SorareClient:
         return out
 
     def fetch_probable_starters(
-        self, leaderboard_slug: str, min_odds: int = 5000
+        self, fixture_slug: str, min_odds: int = 5000
     ) -> tuple[set[str], str | None]:
-        """Slugy hráčů, u kterých Sorare čeká, že v tomhle gameweeku nastoupí.
+        """Slugy nadhazovačů ohlášených jako startéři v tomhle gameweeku.
 
-        Ptáme se lavičky konkrétního leaderboardu, takže výsledek platí pro
-        ten gameweek — `nextGame` na hráči ukazuje na nejbližší zápas vůbec,
-        klidně mimo gameweek.
+        Zdrojem jsou zápasy fixture — to je to, z čeho Sorare kreslí odznak
+        "PP" na kartě. `min_odds` se nepoužívá, zůstává kvůli kompatibilitě
+        volání.
 
-        Na pozice nefiltrujeme: enum `Position` nepoužívá stejné hodnoty jako
-        `anyPositions` na kartách (BASEBALL_STARTING_PITCHER tam neexistuje).
-        Nadhazovače si vybereme sami podle karet.
-
-        Vrací (slugy, chyba). Chybu vracíme ven, ať je vidět v logu — jinak
+        Vrací (slugy, chyba). Chybu vracíme ven, ať je vidět v logu: jinak
         se tiše postaví sestava s nadhazovači, kteří nenastoupí.
         """
-        found: set[str] = set()
-        cursor: str | None = None
+        body = self.execute(
+            queries.PROBABLE_STARTERS,
+            {"slug": fixture_slug},
+            operation_name="FixtureProbablePitchers",
+            tolerate_errors=True,
+        )
+        if body.get("errors"):
+            return set(), "; ".join(
+                e.get("message", "?") for e in body["errors"]
+            )[:300]
 
-        for _ in range(10):  # strop proti nekonečnému stránkování
-            body = self.execute(
-                queries.PROBABLE_STARTERS,
-                {"slug": leaderboard_slug, "minOdds": min_odds, "after": cursor},
-                operation_name="ProbableStarters",
-                tolerate_errors=True,
-            )
-            if body.get("errors"):
-                return set(), "; ".join(
-                    e.get("message", "?") for e in body["errors"]
-                )[:300]
+        fixture = ((body.get("data") or {}).get("so5") or {}).get("so5Fixture") or {}
+        games = fixture.get("anyGames") or []
+        if not games:
+            return set(), "fixture nevrátil žádné zápasy"
 
-            board = ((body.get("data") or {}).get("so5") or {}).get("so5Leaderboard") or {}
-            bench = board.get("myFilteredBench")
-            if bench is None:
-                return set(), "myFilteredBench nevrátil nic"
-
-            for node in bench.get("nodes") or []:
-                slug = (node.get("anyPlayer") or {}).get("slug")
-                if slug:
-                    found.add(slug)
-
-            page = bench.get("pageInfo") or {}
-            if not page.get("hasNextPage"):
-                break
-            cursor = page.get("endCursor")
-
-        return found, None if found else "nikdo nad prahem startu"
+        found = {
+            p.get("slug")
+            for game in games
+            for p in (game.get("probablePitchers") or [])
+            if p.get("slug")
+        }
+        return found, None if found else f"v {len(games)} zápasech nikdo ohlášený"
 
     def fetch_bench(
         self, leaderboard_slug: str, filters: dict, limit_pages: int = 6
