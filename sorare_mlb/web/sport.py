@@ -16,10 +16,11 @@ BODY = """
 
 <section>
   <h2 class="label">Sbírka</h2>
-  <div class="grid g4" id="stats">
+  <div class="grid g5" id="stats">
     <div class="cell"><div class="label">Karet</div><div class="big" id="st-count">—</div></div>
     <div class="cell"><div class="label">Průměr L15</div><div class="big" id="st-l15">—</div></div>
     <div class="cell"><div class="label">Bez zápasu</div><div class="big" id="st-idle">—</div><p class="muted" id="st-idle-note"></p></div>
+    <div class="cell"><div class="label">V trezoru</div><div class="big" id="st-vault">—</div><p class="muted">nepočítají se do formy</p></div>
     <div class="cell"><div class="label">Sledované turnaje</div><div class="big" id="st-boards">—</div><p class="muted">se sestavou / otevřené</p></div>
   </div>
 </section>
@@ -31,6 +32,13 @@ BODY = """
       <div class="cell"><div class="label">Rarita</div><div id="by-rarity"></div></div>
       <div class="cell"><div class="label">Pozice</div><div id="by-position"></div></div>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="split">
+    <h2 class="label">Probíhající gameweek</h2>
+    <div id="live" class="skeleton">Načítám…</div>
   </div>
 </section>
 
@@ -58,6 +66,16 @@ BODY = """
       <p class="muted">Karty bez zápasu déle než limit. Kandidáti na prodej nebo výměnu.</p>
     </div>
     <div id="idle"></div>
+  </div>
+</section>
+
+<section id="vault-wrap" hidden>
+  <div class="split">
+    <div>
+      <h2 class="label">V trezoru</h2>
+      <p class="muted">Zakonzervované karty. Automat je nepoužívá.</p>
+    </div>
+    <div id="vault"></div>
   </div>
 </section>
 
@@ -118,6 +136,10 @@ function render(d) {
   $("#st-count").textContent = num(d.count);
   $("#st-l15").textContent = num(d.avg_l15, 1);
   $("#st-idle").textContent = num(d.idle_count);
+  $("#st-vault").textContent = num(d.vault_count || 0);
+  $("#vault-wrap").hidden = !(d.vault || []).length;
+  $("#vault").innerHTML = (d.vault || []).length ? `<table><thead><tr><th>Hráč</th><th>Tým</th><th>Rarita</th><th>Sezóna</th></tr></thead>
+    <tbody>${d.vault.map(v => `<tr><td>${esc(v.player)}</td><td>${esc(v.team || "—")}</td><td>${esc(v.rarity)}</td><td>${esc(v.season ?? "—")}</td></tr>`).join("")}</tbody></table>` : "";
   $("#st-idle-note").textContent = `déle než ${d.idle_after_days} dní`;
   $("#by-rarity").innerHTML = bars(d.by_rarity);
   $("#by-position").innerHTML = bars(d.by_position);
@@ -164,7 +186,23 @@ async function loadBoards() {
   } catch (e) { failed(el, e); }
 }
 
+async function loadLive() {
+  const el = $("#live");
+  el.classList.remove("skeleton");
+  try {
+    const rec = await api("/api/recent-lineups");
+    const rows = rec.lineups.filter(r => r.live && (!rec.has_sport || r.sport === SPORT_KEY));
+    el.innerHTML = rows.length ? `<div class="scroll"><table><thead><tr><th>Soutěž</th><th>GW</th><th>Konec</th>
+      ${rec.has_scores ? `<th class="num">Body</th><th class="num">Pořadí</th>` : ""}</tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${esc(r.tournament)}</td><td>${esc(r.game_week ?? "—")}</td><td>${when(r.end)}</td>
+      ${rec.has_scores ? `<td class="num">${num(r.score, 1)}</td><td class="num">${r.ranking ? num(r.ranking) + "." : "—"}</td>` : ""}</tr>`).join("")}
+      </tbody></table></div><p class="muted">${rows.length} sestav v běžícím kole.</p>`
+      : `<div class="empty">Teď se nehraje žádná tvoje sestava.</div>`;
+  } catch (e) { failed(el, e); }
+}
+
 $("#refresh").onclick = () => load(true);
+loadLive();
 ["#q", "#pos", "#rar"].forEach(s => $(s).addEventListener("input", () => DATA && renderAll()));
 load(false);
 loadBoards();

@@ -11,6 +11,7 @@ from html import escape
 
 NAV = [
     ("dashboard", "/", "Přehled"),
+    ("rewards", "/vyhry", "Výhry"),
     ("mlb", "/mlb", "MLB"),
     ("mlb-lineups", "/mlb/sestavy", "Sestavy MLB"),
     ("mlb-history", "/mlb/historie", "Historie MLB"),
@@ -124,6 +125,7 @@ section { margin-top: var(--section); padding-top: var(--gap); border-top: 1px s
 }
 .btn:hover:not(:disabled) { background: var(--ink); color: var(--parchment); }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn[aria-pressed="true"] { background: var(--ink); color: var(--parchment); }
 .link { text-decoration: none; border-radius: 10px; padding: 5px 0; }
 .link:hover { text-decoration: underline; text-underline-offset: 3px; }
 :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }

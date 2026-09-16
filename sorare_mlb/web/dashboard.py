@@ -9,6 +9,13 @@ BODY = """
   <p class="lede" id="hello">MLB a fotbal na jednom místě: uzávěrky, sestavy, forma karet a stav automatu.</p>
 </div>
 
+<section aria-labelledby="s-live">
+  <div class="split">
+    <h2 class="label" id="s-live">Právě se hraje</h2>
+    <div id="live" class="skeleton">Načítám…</div>
+  </div>
+</section>
+
 <section aria-labelledby="s-deadline">
   <div class="split">
     <h2 class="label" id="s-deadline">Nejbližší uzávěrky</h2>
@@ -20,6 +27,13 @@ BODY = """
   <div class="split">
     <h2 class="label" id="s-alerts">Potřebuje pozornost</h2>
     <div id="alerts" class="skeleton">Kontroluji…</div>
+  </div>
+</section>
+
+<section aria-labelledby="s-win">
+  <div class="split">
+    <h2 class="label" id="s-win">Výhry</h2>
+    <div id="wins" class="skeleton">Načítám…</div>
   </div>
 </section>
 
@@ -114,6 +128,35 @@ function renderRecent(rec) {
     </tr>`).join("")}</tbody></table></div>`;
 }
 
+function renderLive(rec) {
+  const el = $("#live");
+  el.classList.remove("skeleton");
+  if (rec.error) return failed(el, rec.error);
+  const cur = rec.current || [];
+  el.innerHTML = cur.length ? `<div class="grid gfit">${cur.map(c => `<div class="cell">
+      <div class="label">${SPORT[c.sport] || "Sport"}, GW ${esc(c.game_week ?? "?")}</div>
+      <div class="big">${c.lineups} ${c.lineups === 1 ? "sestava" : c.lineups < 5 ? "sestavy" : "sestav"}</div>
+      <p class="muted">konec ${when(c.end)}${c.score != null ? `, zatím ${num(c.score, 1)} bodů celkem` : ""}</p>
+      <p>${Object.entries(c.tournaments).map(([n, k]) => `${esc(n)}${k > 1 ? ` (${k}×)` : ""}`).join("<br>")}</p>
+      <a class="link" href="${SPORT_URL[c.sport] || "/"}">Detail</a></div>`).join("")}</div>`
+    : `<div class="empty">Teď se nehraje žádná tvoje sestava.</div>`;
+}
+
+async function loadWins() {
+  const el = $("#wins");
+  try {
+    const w = await api("/api/rewards");
+    el.classList.remove("skeleton");
+    const t = w.totals;
+    el.innerHTML = `<div class="grid g4">
+      <div class="cell"><div class="label">Peníze</div><div class="big">${t.money ? num(t.money, 2) + " €" : "—"}</div></div>
+      <div class="cell"><div class="label">Essence</div><div class="big">${num(t.essence)}</div></div>
+      <div class="cell"><div class="label">Karty a balíčky</div><div class="big">${num(t.cards)}</div></div>
+      <div class="cell"><div class="label">Nejvýnosnější soutěž</div><div class="mid">${esc((w.competitions[0] || {}).tournament || "—")}</div></div>
+    </div><p><a class="btn" href="/vyhry">Všechny výhry</a></p>`;
+  } catch (e) { el.classList.remove("skeleton"); failed(el, e); }
+}
+
 function collectionCell(sport) {
   return `<div class="cell paper-grid" id="col-${sport}">
     <div class="label">${SPORT[sport]}</div>
@@ -149,6 +192,8 @@ async function loadCollection(sport) {
   renderDeadlines(d.upcoming);
   renderAutomat(d.job);
   renderRecent(d.recent);
+  renderLive(d.recent);
+  if (d.auth.authenticated) loadWins(); else failed($("#wins"), "Nejsi přihlášen.");
   renderAlerts();
 
   $("#collections").innerHTML = d.sports.map(collectionCell).join("");

@@ -27,6 +27,16 @@ BODY = """
 
 <section>
   <div class="split">
+    <div>
+      <h2 class="label">Schéma Sorare</h2>
+      <p class="muted">Co aplikace našla ve veřejném schématu. Obnovuje se jednou denně.</p>
+    </div>
+    <div id="schema" class="skeleton">Kontroluji…</div>
+  </div>
+</section>
+
+<section>
+  <div class="split">
     <h2 class="label">Sledované turnaje</h2>
     <div id="tracked" class="skeleton">Načítám…</div>
   </div>
@@ -62,6 +72,16 @@ const yes = (v) => `<span class="state ${v ? "on" : ""}">${v ? "Nastaveno" : "Ch
       ${Object.entries(h.optional).map(([k, v]) => `<tr><td>${esc(k)} <span class="muted">volitelné</span></td><td>${yes(v)}</td></tr>`).join("")}
       </tbody></table>`;
   } catch (e) { failed($("#health"), e); }
+  try {
+    const f = await api("/api/schema-features");
+    const el = $("#schema"); el.classList.remove("skeleton");
+    el.innerHTML = `<table><tbody>
+      <tr><td>Příznak trezoru</td><td>${f.vault_field ? `<span class="state on"><code>${esc(f.vault_field)}</code></span>` : `<span class="state">Nenalezen</span>`}</td></tr>
+      <tr><td>Výhry (rewardedRankings)</td><td>${f.rewards_available ? `<span class="state on">Dostupné</span>` : `<span class="state stop">${esc(f.rewards_reason)}</span>`}</td></tr>
+      </tbody></table>
+      <p><button class="btn" id="schema-refresh">Načíst schéma znovu</button></p>`;
+    $("#schema-refresh").onclick = async () => { await api("/api/schema-features?refresh=1"); location.reload(); };
+  } catch (e) { failed($("#schema"), e); }
   try {
     const c = await api("/api/config-summary");
     const el = $("#tracked"); el.classList.remove("skeleton");
