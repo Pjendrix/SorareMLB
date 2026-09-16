@@ -23,7 +23,7 @@ from datetime import datetime
 
 import requests
 
-from . import mlb, notify
+from . import history, mlb, notify
 from .client import SorareClient, SorareError, card_from_dict
 from .models import Card, Config, Lineup, LineupSlot, Projection, Tournament
 from .optimizer import LineupOptimizer, OptimizationError
@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 # Kolik sekund necháme jako rezervu, než se funkce sama ukončí a předá štafetu.
 BUDGET_SECONDS = float(os.environ.get("STEP_BUDGET_SECONDS", 40))
 SCORE_BATCH = 25
+TERMINAL = ("DONE", "FAILED", "NEEDS_REVIEW")
 
 
 @dataclass
@@ -104,6 +105,7 @@ def create_job(mode: str = "auto") -> Job:
 def advance(job: Job, config: Config) -> Job:
     """Posune job co nejdál v rámci časového rozpočtu."""
     deadline = time.monotonic() + BUDGET_SECONDS
+    started_in = job.state
 
     try:
         while job.state not in ("DONE", "FAILED", "NEEDS_REVIEW"):
@@ -126,6 +128,10 @@ def advance(job: Job, config: Config) -> Job:
         log.exception("Job %s selhal", job.id)
         save(job)
         notify.notify(f"❌ **Sorare job selhal**\n```\n{job.error}\n{traceback.format_exc()[-800:]}\n```")
+
+    # Do historie jen jednou — při přechodu do koncového stavu.
+    if job.state in TERMINAL and started_in not in TERMINAL:
+        history.record_job(job)
 
     return job
 

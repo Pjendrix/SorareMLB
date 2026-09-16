@@ -37,6 +37,14 @@ class Store:
     def delete(self, key: str) -> None:
         raise NotImplementedError
 
+    def push_capped(self, key: str, value: Any, limit: int) -> None:
+        """Přidá položku na začátek seznamu a ořízne ho na `limit`."""
+        raise NotImplementedError
+
+    def read_list(self, key: str, limit: int = 100) -> list:
+        """Nejnovější položky seznamu (už rozparsované z JSON)."""
+        raise NotImplementedError
+
     # --- pohodlné obaly ---
 
     def get_json(self, key: str, default: Any = None) -> Any:
@@ -78,6 +86,15 @@ class UpstashStore(Store):
 
     def delete(self, key: str) -> None:
         self._cmd("DEL", key)
+
+    def push_capped(self, key: str, value: Any, limit: int) -> None:
+        payload = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        self._cmd("LPUSH", key, payload)
+        self._cmd("LTRIM", key, "0", str(limit - 1))
+
+    def read_list(self, key: str, limit: int = 100) -> list:
+        raw = self._cmd("LRANGE", key, "0", str(limit - 1)) or []
+        return [_loads(r) for r in raw]
 
 
 class LocalStore(Store):
@@ -132,6 +149,30 @@ class LocalStore(Store):
             data.pop(key, None)
             self._write(data)
 
+    def push_capped(self, key: str, value: Any, limit: int) -> None:
+        with self._lock:
+            data = self._read()
+            items = (data.get(key) or {}).get("value") or []
+            if not isinstance(items, list):
+                items = []
+            items.insert(0, value)
+            data[key] = {"value": items[:limit], "expires_at": None}
+            self._write(data)
+
+    def read_list(self, key: str, limit: int = 100) -> list:
+        with self._lock:
+            items = (self._read().get(key) or {}).get("value") or []
+        return list(items)[:limit] if isinstance(items, list) else []
+
+
+def _loads(raw: Any) -> Any:
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
 
 _store: Store | None = None
 
@@ -176,3 +217,11 @@ K_JOB = "job:{job_id}"
 K_LATEST_JOB = "job:latest"
 K_LAST_RESULT = "result:latest"
 K_SUBMITTED = "submitted:{fixture}"
+
+# Přehledy a historie
+K_OVERVIEW = "overview:{sport}"
+K_UPCOMING = "sorare:upcoming"
+K_RECENT_LINEUPS = "sorare:recent-lineups"
+K_HIST_JOBS = "history:jobs"
+K_HIST_SNAPSHOTS = "history:snapshots:{sport}"
+K_HIST_SNAPSHOT_DAY = "history:snapshot-day:{sport}"

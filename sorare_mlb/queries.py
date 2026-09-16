@@ -156,3 +156,72 @@ query BenchProbe($slug: String!, $filters: BenchFilterInput!, $after: String) {
   }
 }
 """
+
+
+# --------------------------------------------------------------------- přehledy
+#
+# Karty libovolného sportu. Stejná pole jako USER_CARDS, jen bez projekce
+# (`nextClassicFixtureProjectedScore` je ověřený jen u baseballu).
+SPORT_CARDS = """
+query UserSportCards($sport: Sport!, $rarities: [Rarity!], $after: String) {
+  currentUser {
+    cards(sport: $sport, rarities: $rarities, first: 20, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        slug
+        rarityTyped
+        seasonYear
+        anyPositions
+        anyTeam { slug name }
+        anyPlayer {
+          slug
+          displayName
+          playerGameScores(last: 15) {
+            score
+            anyGame { date }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Historie sestav. Sorare schéma pro výsledky není ověřené, proto tři úrovně:
+# klient zkusí nejbohatší variantu a při chybě schématu spadne na jednodušší.
+# Pole leaderboardu a fixture jsou stejná jako v UPCOMING_LEADERBOARDS
+# (ověřená), nejistá jsou jen `so5Rankings` a `score`.
+RECENT_LINEUPS_TIERS = [
+    ("RecentLineupsScored", """
+query RecentLineupsScored {
+  so5 {
+    myOngoingAndRecentSo5Lineups {
+      id
+      so5Rankings { ranking score }
+      so5Leaderboard {
+        slug
+        displayName
+        rarityType
+        so5Fixture { slug gameWeek sport startDate endDate }
+      }
+    }
+  }
+}
+"""),
+    ("RecentLineupsFixture", """
+query RecentLineupsFixture {
+  so5 {
+    myOngoingAndRecentSo5Lineups {
+      id
+      so5Leaderboard {
+        slug
+        displayName
+        rarityType
+        so5Fixture { slug gameWeek sport startDate endDate }
+      }
+    }
+  }
+}
+"""),
+    ("RecentLineupsBasic", MY_LINEUPS.replace("query MyLineups", "query RecentLineupsBasic")),
+]

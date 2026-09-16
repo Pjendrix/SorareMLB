@@ -1,7 +1,14 @@
 """Vercel entrypoint — FastAPI aplikace.
 
 Endpointy:
-    GET  /                webové rozhraní
+    GET  /                dashboard (další stránky: /mlb, /mlb/sestavy, /mlb/historie,
+                          /fotbal, /fotbal/sestavy, /fotbal/historie, /nastaveni)
+    GET  /api/dashboard   souhrn pro hlavní stránku
+    GET  /api/overview/{sport}   přehled sbírky (mlb|football), ?refresh=1
+    GET  /api/upcoming    otevřené turnaje napříč sporty
+    GET  /api/recent-lineups     nedávné sestavy ze Sorare
+    GET  /api/history/{sport}    snímky sbírky a běhy automatu
+    GET  /api/config-summary     sledované turnaje a sporty
     POST /api/build       spustí job (mode=auto|propose), vrátí job_id
     POST /api/continue    interní — navázání dalšího kroku (chráněno secretem)
     GET  /api/status      stav posledního / konkrétního jobu
@@ -25,7 +32,9 @@ from sorare_mlb.models import Config  # noqa: E402
 from sorare_mlb.store import StoreUnavailable, get_store  # noqa: E402
 from sorare_mlb.auth import AuthError, OtpRequired, complete_login, start_login, token_status  # noqa: E402
 from sorare_mlb.login_ui import LOGIN_PAGE  # noqa: E402
-from sorare_mlb.ui import PAGE  # noqa: E402
+from sorare_mlb.ui import PAGES  # noqa: E402
+from sorare_mlb import history, overview  # noqa: E402
+from sorare_mlb.sports import ADAPTERS  # noqa: E402
 
 app = FastAPI(title="Sorare MLB Lineups", docs_url=None, redoc_url=None)
 
@@ -82,9 +91,91 @@ def _check_secret(provided: str | None, request: Request) -> None:
 # --------------------------------------------------------------------- UI
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return PAGE
+def _page_route(path: str, html: str) -> None:
+    app.add_api_route(
+        path, lambda: HTMLResponse(html), methods=["GET"], include_in_schema=False
+    )
+
+
+for _path, _html in PAGES.items():
+    _page_route(_path, _html)
+
+
+# --------------------------------------------------------------------- přehledy
+
+
+def _sport_or_404(sport: str) -> str:
+    if sport not in ADAPTERS:
+        raise HTTPException(404, f"Neznámý sport {sport}. Povolené: {', '.join(ADAPTERS)}.")
+    return sport
+
+
+def _sorare_call(fn, *args, **kwargs):
+    """Chyby Sorare vrací jako čitelnou 502 místo holé 500."""
+    _require_auth()
+    try:
+        return fn(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}"[:500]) from exc
+
+
+@app.get("/api/dashboard")
+def api_dashboard() -> JSONResponse:
+    return JSONResponse(overview.dashboard(_config()))
+
+
+@app.get("/api/overview/{sport}")
+def api_overview(sport: str, refresh: bool = False) -> JSONResponse:
+    _sport_or_404(sport)
+    return JSONResponse(_sorare_call(overview.sport_overview, sport, _config(), refresh))
+
+
+@app.get("/api/upcoming")
+def api_upcoming() -> JSONResponse:
+    return JSONResponse(_sorare_call(overview.upcoming, _config()))
+
+
+@app.get("/api/recent-lineups")
+def api_recent_lineups() -> JSONResponse:
+    return JSONResponse(_sorare_call(overview.recent_lineups, _config()))
+
+
+@app.get("/api/history/{sport}")
+def api_history(sport: str, limit: int = 60) -> JSONResponse:
+    _sport_or_404(sport)
+    jobs = [j for j in history.jobs(limit) if j.get("sport") == sport]
+    return JSONResponse({"snapshots": history.snapshots(sport), "jobs": jobs})
+
+
+@app.get("/api/config-summary")
+def api_config_summary() -> JSONResponse:
+    config = _config()
+    sports_cfg = config.get("sports") or {}
+    tournaments = [dict(t, sport="MLB") for t in config.get("tournaments") or []]
+    tournaments += [
+        dict(t, sport="Fotbal")
+        for t in (sports_cfg.get("football") or {}).get("tournaments") or []
+    ]
+    return JSONResponse(
+        {
+            "tournaments": [
+                {k: t.get(k) for k in ("sport", "name", "slug_contains", "rarity", "max_lineups")}
+                for t in tournaments
+            ],
+            "sports": [
+                {
+                    "key": key,
+                    "label": cls.label,
+                    "enabled": (sports_cfg.get(key) or {}).get("enabled", True),
+                    "lineups": cls.lineups_supported
+                    and (sports_cfg.get(key) or {}).get("lineups_enabled", True),
+                }
+                for key, cls in ADAPTERS.items()
+            ],
+        }
+    )
 
 
 @app.get("/login", response_class=HTMLResponse)

@@ -13,7 +13,7 @@ import requests
 from . import queries
 from .auth import Token, ensure_token
 from .models import Card, Config, Player, env
-from .store import K_CARDS, get_store
+from .store import K_CARDS, K_RECENT_LINEUPS, K_UPCOMING, get_store
 
 
 class SorareError(RuntimeError):
@@ -217,14 +217,72 @@ class SorareClient:
 
         return nodes, None
 
-    def fetch_leaderboards(self) -> list[dict]:
-        """Otevřené baseballové leaderboardy — to, čemu v configu říkáme turnaje."""
+    def fetch_leaderboards(self, sport: str = "BASEBALL") -> list[dict]:
+        """Otevřené leaderboardy daného sportu — to, čemu v configu říkáme turnaje."""
+        return [
+            b for b in self.fetch_all_upcoming()
+            if str(((b.get("so5Fixture") or {}).get("sport") or "")).upper() == sport
+        ]
+
+    def fetch_all_upcoming(self, cache_seconds: int = 0) -> list[dict]:
+        """Otevřené leaderboardy napříč sporty (jeden dotaz pro všechny)."""
+        if cache_seconds:
+            cached = self.store.get_json(K_UPCOMING)
+            if cached is not None:
+                return cached
         body = self.execute(queries.UPCOMING_LEADERBOARDS, operation_name="UpcomingLeaderboards")
         boards = ((body.get("data") or {}).get("so5") or {}).get("upcomingLeaderboards") or []
-        return [
-            b for b in boards
-            if str(((b.get("so5Fixture") or {}).get("sport") or "")).upper() == "BASEBALL"
-        ]
+        if cache_seconds:
+            self.store.set(K_UPCOMING, boards, ttl_seconds=cache_seconds)
+        return boards
+
+    # ------------------------------------------------------------------ přehledy
+
+    def execute_first_ok(self, tiers: list[tuple[str, str]], variables: dict | None = None) -> tuple[dict, str]:
+        """Zkusí dotazy od nejbohatšího; vrátí první, který Sorare přijme.
+
+        Vrací (data, název použité varianty). Když neprojde žádný, vyhodí
+        poslední chybu — ať je v UI vidět proč.
+        """
+        last: Exception | None = None
+        for name, query in tiers:
+            try:
+                body = self.execute(query, variables, operation_name=name, retries=2)
+                return body.get("data") or {}, name
+            except SorareError as exc:
+                last = exc
+        raise SorareError(f"Žádná varianta dotazu neprošla: {last}")
+
+    def fetch_sport_cards(
+        self, sport: str, rarities: list[str], max_pages: int = 15
+    ) -> tuple[list[dict], bool]:
+        """Syrové uzly karet pro přehled. Vrací (uzly, zda byl výpis useknut)."""
+        nodes: list[dict] = []
+        cursor: str | None = None
+        for _ in range(max_pages):
+            body = self.execute(
+                queries.SPORT_CARDS,
+                {"sport": sport, "rarities": rarities, "after": cursor},
+                operation_name="UserSportCards",
+            )
+            block = ((body.get("data") or {}).get("currentUser") or {}).get("cards") or {}
+            nodes.extend(block.get("nodes") or [])
+            page = block.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                return nodes, False
+            cursor = page.get("endCursor")
+        return nodes, True
+
+    def fetch_recent_lineups(self, cache_seconds: int = 600) -> dict:
+        """Probíhající a nedávné sestavy napříč sporty."""
+        cached = self.store.get_json(K_RECENT_LINEUPS)
+        if cached is not None:
+            return cached
+        data, variant = self.execute_first_ok(queries.RECENT_LINEUPS_TIERS)
+        lineups = ((data.get("so5") or {}).get("myOngoingAndRecentSo5Lineups")) or []
+        result = {"variant": variant, "lineups": lineups}
+        self.store.set(K_RECENT_LINEUPS, result, ttl_seconds=cache_seconds)
+        return result
 
     # ------------------------------------------------------------------ mutation
 
