@@ -122,3 +122,28 @@ api:
   mlb_url: https://statsapi.mlb.com/api/v1
   requests_per_minute: 40
   cache_ttl_minutes: 30
+
+# ---------------------------------------------------------------------------
+# Přehledy a sporty
+# ---------------------------------------------------------------------------
+overview:
+  # Jak dlouho držet stažený přehled sbírky, než se stáhne znovu.
+  cache_minutes: 30
+
+sports:
+  mlb:
+    enabled: true
+    lineups_enabled: true
+    # Karta bez zápasu déle než tolik dní se v přehledu ukáže jako „leží ladem“.
+    idle_after_days: 10
+  football:
+    enabled: true
+    # Skládání fotbalových sestav zatím není hotové (FootballAdapter).
+    lineups_enabled: false
+    rarities: [limited, rare, super_rare, unique]
+    # Jedna stránka = 20 karet. Vercel funkce má 60 s, 15 stránek je bezpečně.
+    max_card_pages: 15
+    idle_after_days: 14
+    # Turnaje, které se na dashboardu hlídají (chybějící sestava = upozornění).
+    # Formát stejný jako `tournaments` výše; slugy zjistíš na /api/upcoming.
+    tournaments: []

@@ -1,6 +1,58 @@
-# Sorare MLB — automatické sestavy
+# Sorare MLB — automatické sestavy a přehledy
 
-Webová aplikace, která skládá sestavy pro **Hot Streaks** a **Challenger**.
+Webová aplikace pro Sorare: přehled MLB i fotbalu na jednom místě a automat,
+který skládá sestavy pro **Hot Streaks** a **Challenger**.
+
+## Stránky
+
+| Cesta | Obsah |
+|---|---|
+| `/` | Dashboard: nejbližší uzávěrky, co potřebuje pozornost, sbírky, stav automatu, poslední sestavy |
+| `/mlb`, `/fotbal` | Sbírka: rarity, pozice, forma (L5/L15, trend), karty bez zápasu, otevřené turnaje, filtr karet |
+| `/mlb/sestavy` | Builder sestav MLB (návrh, kontrola, odeslání) |
+| `/fotbal/sestavy` | Placeholder: plánovaný formát, otevřené turnaje, co zbývá |
+| `/mlb/historie`, `/fotbal/historie` | Vývoj sbírky, sestavy ze Sorare, běhy automatu |
+| `/nastaveni` | Přihlášení, kontrola env proměnných, sledované turnaje |
+
+## Struktura kódu
+
+```
+sorare_mlb/
+  sports/        SportAdapter + BaseballAdapter, FootballAdapter
+  overview.py    data pro přehledy (každý blok selhává samostatně)
+  history.py     historie v Redisu (běhy automatu, denní snímky sbírky)
+  web/           layout (design tokeny) a jednotlivé stránky
+  ui.py          registr stránek
+tools/schema.py  lokální prohlížení veřejného GraphQL schématu Sorare
+```
+
+### Historie
+
+Sorare API vrací jen probíhající a nedávné sestavy. Aplikace si proto ukládá
+vlastní historii: záznam o každém dokončeném běhu automatu (max. 200)
+a jednou denně snímek sbírky při otevření přehledu (max. 400 na sport).
+
+### Nejisté části schématu
+
+Body a pořadí u nedávných sestav (`so5Rankings`) nejsou ověřené proti
+schématu. Klient zkouší dotaz ve třech variantách a použije první, kterou
+Sorare přijme; UI pak body buď ukáže, nebo napíše, že nejsou k dispozici.
+Ověřit se to dá lokálně:
+
+```
+python tools/schema.py So5Lineup
+python tools/schema.py --search ranking
+```
+
+### Fotbalové sestavy (později)
+
+Doplň `build_lineups`, `validate_lineups` a `submit_lineups`
+ve `sorare_mlb/sports/football.py` a zapni `sports.football.lineups_enabled`
+v `config.yaml`.
+
+---
+
+## Automat sestav MLB
 Spustíš ji tlačítkem na stránce, nebo si ji necháš běžet automaticky před
 deadlinem gameweeku. Výsledek ti přijde na Discord/Telegram.
 
