@@ -89,3 +89,34 @@ def test_password_gate(monkeypatch):
     assert client.get("/nastaveni", headers={"Authorization": f"Basic {good}"}).status_code == 200
     # cron má vlastní secret, heslo ho neblokuje
     assert "Přihlášení vyžadováno" not in client.get("/api/cron").text
+
+
+def test_roles_and_duplicate_withdrawals():
+    general = [
+        ledger.normalize({"id": "1", "entryType": "DEPOSIT", "createdAt": "2024-01-01", "amounts": {"eurCents": 10000}}, "accountEntries"),
+        ledger.normalize({"id": "2", "entryType": "WITHDRAWAL", "createdAt": "2024-02-01", "amounts": {"eurCents": 4000}}, "accountEntries"),
+    ]
+    extra = [
+        ledger.normalize({"id": "3", "createdAt": "2024-02-01", "amount": {"eurCents": 4000}}, "bankWithdrawals", "withdrawal"),
+        ledger.normalize({"id": "4", "createdAt": "2024-03-01", "amount": {"eurCents": 2500}, "status": "succeeded"},
+                         "spentFiatPaymentIntents", "card_payment"),
+        ledger.normalize({"id": "5", "createdAt": "2024-03-02", "quantity": 120, "rarity": "limited"},
+                         "cardShardsHistoryTransactions", "essence"),
+        ledger.normalize({"id": "6", "createdAt": "2024-03-03", "quantity": 50, "type": "SPENT"},
+                         "cardShardsHistoryTransactions", "essence"),
+    ]
+    s = ledger.summarize(general + extra)
+    h = s["headline"]
+    assert h["withdrawn"] == 40 and h["skipped_duplicates"] == 1
+    assert h["card_payments"] == 25 and h["invested"] == 125
+    assert h["cash_result"] == -85
+    assert s["quantities"]["essence"] == {"gained": 120, "spent": 50, "count": 2}
+    assert extra[2]["eur"] is None
+
+
+def test_withdrawal_source_counts_when_general_has_none():
+    rows = [
+        ledger.normalize({"id": "1", "entryType": "DEPOSIT", "amounts": {"eurCents": 1000}}, "accountEntries"),
+        ledger.normalize({"id": "3", "amount": {"eurCents": 400}}, "withdrawals", "withdrawal"),
+    ]
+    assert ledger.summarize(rows)["headline"]["withdrawn"] == 4
