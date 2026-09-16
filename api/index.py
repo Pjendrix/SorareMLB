@@ -149,6 +149,45 @@ def api_history(sport: str, limit: int = 60) -> JSONResponse:
     return JSONResponse({"snapshots": history.snapshots(sport), "jobs": jobs})
 
 
+@app.get("/api/rewards")
+def api_rewards(sport: str | None = None, refresh: bool = False) -> JSONResponse:
+    """Souhrn výher z archivu. `refresh=1` nejdřív stáhne nová umístění."""
+    from sorare_mlb import rewards
+
+    if sport:
+        _sport_or_404(sport)
+    config = _config()
+    sync = None
+    if refresh or not rewards.archive(sport):
+        sync = _sorare_call(rewards.sync, config, sport)
+    rows = rewards.archive(sport)
+    # Fotbal: jen rarity, které hraješ (sports.football.board_rarities).
+    rows = [
+        r for r in rows
+        if r["sport"] not in ADAPTERS or overview._rarity_ok(r["sport"], r.get("rarity"), config)
+    ]
+    summary = rewards.summarize(rows, sport)
+    summary["sync"] = sync
+    return JSONResponse(summary)
+
+
+@app.get("/api/schema-features")
+def api_schema_features(refresh: bool = False) -> JSONResponse:
+    """Co aplikace ve schématu Sorare našla (trezor, odměny)."""
+    from sorare_mlb.features import get_features
+
+    feats = get_features(refresh=refresh)
+    rewards_info = feats.get("rewards") or {}
+    return JSONResponse(
+        {
+            "vault_field": (feats.get("vault") or {}).get("field"),
+            "rewards_available": rewards_info.get("available", False),
+            "rewards_reason": rewards_info.get("reason"),
+            "rewards_query": rewards_info.get("query"),
+        }
+    )
+
+
 @app.get("/api/config-summary")
 def api_config_summary() -> JSONResponse:
     config = _config()
