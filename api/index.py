@@ -289,7 +289,8 @@ def api_ledger_debug(refresh: bool = False) -> JSONResponse:
     feats = get_features(refresh=refresh).get("ledger") or {}
     return JSONResponse({
         "candidates": feats.get("candidates"),
-        "sources": [{k: src[k] for k in ("field", "query")} for src in feats.get("sources") or []],
+        "sources": [{k: src.get(k) for k in ("field", "role", "query")} for src in feats.get("sources") or []],
+        "skipped": feats.get("skipped"),
         "balance_query": feats.get("balance_query"),
         "samples": ledger.samples(),
         "types_seen": sorted({
@@ -312,7 +313,10 @@ def api_schema_features(refresh: bool = False) -> JSONResponse:
             "rewards_reason": rewards_info.get("reason"),
             "rewards_query": rewards_info.get("query"),
             "ledger_available": (feats.get("ledger") or {}).get("available", False),
-            "ledger_sources": [x["field"] for x in (feats.get("ledger") or {}).get("sources") or []],
+            "ledger_sources": [
+                f"{x['field']} ({x.get('role') or 'podle typu'})"
+                for x in (feats.get("ledger") or {}).get("sources") or []
+            ],
             "ledger_reason": (feats.get("ledger") or {}).get("reason"),
             "ledger_candidates": (feats.get("ledger") or {}).get("candidates"),
             "diagnostics": feats.get("diagnostics"),
