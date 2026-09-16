@@ -71,6 +71,8 @@ class Card:
     # Sorare hráče vede mezi ohlášenými startéry příštího zápasu ("PP").
     # None = Sorare o zápasu nic neví.
     sorare_probable_starter: bool | None = None
+    # Karta uložená v trezoru (vault) — do sestav ani přehledu formy nepatří.
+    in_vault: bool = False
 
     @property
     def positions(self) -> list[str]:

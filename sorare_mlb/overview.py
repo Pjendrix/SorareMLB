@@ -21,6 +21,17 @@ def _error(exc: Exception) -> dict:
     return {"error": f"{type(exc).__name__}: {exc}"[:400]}
 
 
+def allowed_rarities(key: str, config: Config) -> list[str] | None:
+    """Rarity turnajů, které se mají ukazovat (None = všechny)."""
+    values = config.get_path(f"sports.{key}.board_rarities")
+    return [str(v).lower() for v in values] if values else None
+
+
+def _rarity_ok(key: str, rarity, config: Config) -> bool:
+    allowed = allowed_rarities(key, config)
+    return not allowed or not rarity or str(rarity).lower() in allowed
+
+
 def enabled_sports(config: Config) -> list[str]:
     sports = config.get("sports") or {}
     return [k for k in ADAPTERS if (sports.get(k) or {}).get("enabled", True)]
@@ -70,11 +81,25 @@ def upcoming(config: Config) -> dict:
     out: dict[str, list] = {k: [] for k in ADAPTERS}
     fixtures: dict[str, dict] = {}
 
+    # `mySo5LineupsCount` u otevřených leaderboardů někdy vrací 0, i když
+    # sestava existuje. Druhým zdrojem jsou moje probíhající sestavy.
+    mine_by_slug: dict[str, int] = {}
+    try:
+        for lu in (client.fetch_recent_lineups().get("lineups") or []):
+            slug = (lu.get("so5Leaderboard") or {}).get("slug")
+            if slug:
+                mine_by_slug[slug] = mine_by_slug.get(slug, 0) + 1
+    except Exception:  # noqa: BLE001
+        pass
+
     for b in boards:
         fixture = b.get("so5Fixture") or {}
         key = SPORT_BY_ENUM.get(str(fixture.get("sport") or "").upper())
-        if not key:
+        if not key or not _rarity_ok(key, b.get("rarityType"), config):
             continue
+        b = dict(b, mySo5LineupsCount=max(
+            int(b.get("mySo5LineupsCount") or 0), mine_by_slug.get(b.get("slug"), 0)
+        ))
         out[key].append(
             {
                 "slug": b.get("slug"),
@@ -143,10 +168,14 @@ def recent_lineups(config: Config) -> dict:
         fixture = board.get("so5Fixture") or {}
         rankings = lu.get("so5Rankings") or []
         best = rankings[0] if rankings else {}
+        sport = SPORT_BY_ENUM.get(str(fixture.get("sport") or "").upper(), "?")
+        if sport != "?" and not _rarity_ok(sport, board.get("rarityType"), config):
+            continue
         rows.append(
             {
                 "id": lu.get("id"),
-                "sport": SPORT_BY_ENUM.get(str(fixture.get("sport") or "").upper(), "?"),
+                "board_slug": board.get("slug"),
+                "sport": sport,
                 "tournament": board.get("displayName") or board.get("slug"),
                 "rarity": board.get("rarityType"),
                 "game_week": fixture.get("gameWeek"),
@@ -158,7 +187,21 @@ def recent_lineups(config: Config) -> dict:
             }
         )
     rows.sort(key=lambda r: str(r["end"] or ""), reverse=True)
+
+    # Probíhající gameweek po sportech: kolik sestav a v jakých soutěžích.
+    current: dict[str, dict] = {}
+    for r in rows:
+        if not r["live"]:
+            continue
+        c = current.setdefault(r["sport"], {"sport": r["sport"], "game_week": r["game_week"],
+                                            "end": r["end"], "lineups": 0, "tournaments": {}})
+        c["lineups"] += 1
+        c["tournaments"][r["tournament"]] = c["tournaments"].get(r["tournament"], 0) + 1
+        if r["score"] is not None:
+            c["score"] = round(c.get("score", 0) + float(r["score"]), 1)
+
     return {
+        "current": list(current.values()),
         "variant": raw.get("variant"),
         "has_scores": raw.get("variant") == "RecentLineupsScored",
         "has_sport": raw.get("variant") != "RecentLineupsBasic",

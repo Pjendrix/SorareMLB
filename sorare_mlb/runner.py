@@ -180,7 +180,7 @@ def _step_queued(job: Job, config: Config, deadline: float) -> None:
 
 def _step_cards(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
-    cards = client.fetch_cards()
+    cards = [c for c in client.fetch_cards() if not c.in_vault]
     # Skóre chodí ve stejné odpovědi jako karty, takže samostatný krok odpadá.
     job.scores = client.fetch_scores(cards)
     job.pending_player_slugs = []
@@ -436,7 +436,8 @@ _HANDLERS = {
 def _rebuild(job: Job, config: Config) -> tuple[list[Card], dict[str, Projection]]:
     """Z cache poskládá karty + projekce, aniž by znovu volal Sorare."""
     raw_cards = get_store().get_json(K_CARDS) or []
-    cards = [card_from_dict(c) for c in raw_cards]
+    # Karty v trezoru nejsou k dispozici pro sestavy.
+    cards = [c for c in (card_from_dict(r) for r in raw_cards) if not c.in_vault]
 
     if job.starters_known:
         starters = set(job.probable_starters)

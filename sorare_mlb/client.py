@@ -112,6 +112,18 @@ class SorareClient:
 
     # ------------------------------------------------------------------ data
 
+    def _with_vault(self, query: str) -> str:
+        """Doplní do dotazu na karty příznak trezoru, pokud ho schéma má."""
+        try:
+            from .features import get_features
+
+            selection = (get_features().get("vault") or {}).get("selection")
+        except Exception:  # noqa: BLE001 — bez schématu jedeme bez trezoru
+            selection = None
+        if not selection:
+            return query
+        return query.replace("anyPositions", f"anyPositions\n        {selection}", 1)
+
     def fetch_cards(self, use_cache: bool = True) -> list[Card]:
         """Karty i s posledními skóre — obojí přijde v jedné odpovědi."""
         if use_cache:
@@ -123,7 +135,7 @@ class SorareClient:
         cursor: str | None = None
         while True:
             body = self.execute(
-                queries.USER_CARDS,
+                self._with_vault(queries.USER_CARDS),
                 {"rarities": self.config.get("rarities", ["limited", "rare"]), "after": cursor},
                 operation_name="UserBaseballCards",
             )
@@ -261,7 +273,7 @@ class SorareClient:
         cursor: str | None = None
         for _ in range(max_pages):
             body = self.execute(
-                queries.SPORT_CARDS,
+                self._with_vault(queries.SPORT_CARDS),
                 {"sport": sport, "rarities": rarities, "after": cursor},
                 operation_name="UserSportCards",
             )
@@ -390,6 +402,7 @@ def card_from_dict(node: dict) -> Card:
         # při validaci sestavy — rozhoduje ročník karty.
         in_season=int(node.get("seasonYear") or 0) >= _current_season(),
         sorare_projection=_as_float(raw.get("nextClassicFixtureProjectedScore")),
+        in_vault=bool(node.get("vaultFlag")),
     )
 
 
