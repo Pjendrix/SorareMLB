@@ -113,7 +113,8 @@ function render(d) {
 
   $("#flows").innerHTML =
     cell("Vklady do peněženky", money(h.deposited)) +
-    cell("Platby kartou", money(h.card_payments), "nákupy placené přímo kartou") +
+    cell("Platby kartou", h.card_payments || !h.card_payments_eth ? money(h.card_payments) : num(h.card_payments_eth, 4) + " ETH",
+      h.card_payments && h.card_payments_eth ? `a ${num(h.card_payments_eth, 4)} ETH bez přepočtu` : "nákupy placené přímo kartou") +
     cell("Vybráno", money(h.withdrawn)) +
     cell("Utraceno za karty", money(h.spent), "z peněženky i kartou") +
     cell("Prodeje karet", money(h.sold));
@@ -125,13 +126,15 @@ function render(d) {
     <div class="big">+${num(q[k].gained)}</div><p class="muted">získáno, utraceno ${num(q[k].spent)}, ${q[k].count} transakcí</p></div>`).join("");
 
   const notes = [];
+  if (h.packs_count) notes.push(`${h.packs_count} balíčků koupených za gemy (orientačně ${money(h.packs_eur_equiv)}), do útraty se nepočítají.`);
   if (h.skipped_duplicates) notes.push(`${h.skipped_duplicates} výběrů ze specializovaného zdroje vynecháno, protože už jsou ve výpisu účtu.`);
   if (h.fees) notes.push(`Poplatky ${money(h.fees)}.`);
   if (h.refunds) notes.push(`Vrácení ${money(h.refunds)}.`);
-  if (h.has_usd) notes.push("Část plateb je v USD, v součtech je počítaná 1:1 s eurem.");
+  if (h.has_usd) notes.push("Část plateb má jen dolarovou hodnotu, v součtech je počítaná 1:1 s eurem.");
   const eth = Object.entries(h.eth || {});
-  if (eth.length) notes.push("V ETH: " + eth.map(([k, v]) => `${esc(d.categories_map[k])} ${num(v, 4)} ETH`).join(", ") + ".");
-  if (bal.length) notes.push("Zůstatek podle Sorare: " + bal.map(([k, v]) => `${esc(k)} ${esc(v)}`).join(", ") + ".");
+  if (eth.length) notes.push("Jen v ETH, bez přepočtu na eura: " + eth.map(([k, v]) => `${esc(d.categories_map[k])} ${num(v, 4)} ETH`).join(", ") + ".");
+  const wei = (v) => { const n = Number(v); return isFinite(n) && n > 1e9 ? num(n / 1e18, 6) + " ETH" : esc(v); };
+  if (bal.length) notes.push("Zůstatek podle Sorare: " + bal.map(([k, v]) => `${esc(k)} ${wei(v)}`).join(", ") + ".");
   $("#notes").textContent = notes.join(" ");
 
   const cols = ["deposit", "card_payment", "withdrawal", "purchase", "sale", "fee"];
@@ -175,7 +178,10 @@ function renderEntries() {
     <th class="num">Částka</th><th>Stav</th><th></th></tr></thead><tbody>
     ${rows.map(e => `<tr><td>${day(e.date)}</td><td>${esc(DATA.categories_map[e.category])}</td>
       <td class="muted">${esc(e.type || "—")}</td>
-      <td class="num">${e.qty != null ? (e.qty > 0 ? "+" : "") + num(e.qty) + " ks" : e.eur ? money(e.eur) : e.usd ? num(e.usd, 2) + " $" : e.eth ? num(e.eth, 4) + " ETH" : "—"}</td>
+      <td class="num">${e.qty != null ? (e.qty > 0 ? "+" : "") + num(e.qty) + " ks"
+        : e.eur != null ? money(e.eur) + (e.eth ? ` <span class="muted">(${num(e.eth, 4)} ETH)</span>` : "")
+        : e.usd != null ? num(e.usd, 2) + " $" : e.eth != null ? num(e.eth, 4) + " ETH"
+        : e.in_game != null ? num(e.in_game) + " " + esc(e.currency || "") : "—"}${e.category === "pack" ? ` <span class="muted">ekvivalent</span>` : ""}</td>
       <td class="muted">${esc(e.status || "")}</td>
       <td>${e.source === "manual" ? `<button class="btn" data-del="${esc(e.id)}">Smazat</button>` : ""}</td></tr>`).join("")}
     </tbody></table>${DATA.count > DATA.entries.length ? `<p class="muted">Zobrazeno posledních ${DATA.entries.length} z ${DATA.count}.</p>` : ""}`

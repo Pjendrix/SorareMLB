@@ -106,6 +106,7 @@ function render(d) {
     d.sync ? `Staženo ${d.sync.fetched} umístění, nových ${d.sync.new}.` : "",
     complete ? "Archiv obsahuje celou historii účtu." : "Archiv zatím nemá celou historii, spusť „Stáhnout celou historii“.",
     oldest ? `Nejstarší GW v archivu: ${oldest.game_week}.` : "",
+    !d.count ? "Archiv je prázdný. Když se nic nestáhne, otevři /api/rewards/debug a pošli výstup." : "",
   ].filter(Boolean).join(" ");
   $("#full").textContent = complete ? "Stáhnout historii znovu" : "Stáhnout celou historii";
   $("#full").dataset.reset = complete ? "1" : "";
