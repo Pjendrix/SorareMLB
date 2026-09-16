@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 # Při každé změně toho, co build_features vrací, zvýšit — jinak by se
 # 24 h používala stará uložená verze bez nových klíčů.
-FEATURES_VERSION = 3
+FEATURES_VERSION = 4
 K_FEATURES = f"sorare:features:v{FEATURES_VERSION}"
 REQUIRED_KEYS = ("vault", "rewards", "ledger", "diagnostics")
 LEAF_BASES = {"Int", "Float", "String", "Boolean", "ID"}
@@ -275,10 +275,20 @@ def _rewards(s: Schema) -> dict:
 
 # ------------------------------------------------------------------ peníze
 
-LEDGER_PREFERENCE = (
-    "accountEntries", "myAccountEntries", "walletTransactions", "transactions",
-    "paymentHistory", "payments", "tokenOperations", "activities",
-)
+# Zdroje plateb a jejich role. None = typ se určí z textu záznamu.
+# Varianty „…WithRates“ jsou stejná data s kurzy, proto se vynechávají.
+# pendingDeposits jsou nedokončené a do bilance nepatří.
+LEDGER_ROLES: dict[str, str | None] = {
+    "accountEntries": None,
+    "myAccountEntries": None,
+    "spentFiatPaymentIntents": "card_payment",
+    "withdrawals": "withdrawal",
+    "bankWithdrawals": "withdrawal",
+    "fastWithdrawals": "withdrawal",
+    "cardShardsHistoryTransactions": "essence",
+    "commonGemHistoryTransactions": "gems",
+}
+LEDGER_PREFERENCE = tuple(LEDGER_ROLES)
 LEDGER_RX = r"accountEntr|transaction|payment|withdraw|deposit|operation|ledger|walletEntr|payout"
 LEAF_RX = r"^id$|At$|date|type|kind|status|direction|description|label|reason|currency|amount|cents|wei|value|price|fee|sign|credit|debit"
 MONEY_RX = r"cents|wei|amount|value"
@@ -324,8 +334,18 @@ def _ledger(s: Schema) -> dict:
     candidates.sort(key=lambda n: (LEDGER_PREFERENCE.index(n) if n in LEDGER_PREFERENCE else 99, n))
 
     sources = []
-    for name in candidates[:4]:
+    skipped = []
+    for name in candidates:
+        if name not in LEDGER_ROLES:
+            continue
         fdef = s.field("CurrentUser", name)
+        required = [
+            a for a, t in fdef.arg_types.items()
+            if t.endswith("!") and a not in ("first", "after", "last", "before")
+        ]
+        if required:
+            skipped.append(f"{name} (povinné argumenty: {', '.join(required)})")
+            continue
         node = s.node_type("CurrentUser", name)
         is_conn = s.has(fdef.base, "nodes")
         kind = (s.types.get(node) or TypeDefStub).kind
@@ -339,6 +359,7 @@ def _ledger(s: Schema) -> dict:
         else:
             fields = _entry_selection(s, node)
         if len(fields) < 2:
+            skipped.append(f"{name} (žádná použitelná pole)")
             continue
         args = []
         var_defs = []
@@ -357,6 +378,7 @@ def _ledger(s: Schema) -> dict:
         op = f"Ledger{name[0].upper()}{name[1:]}"
         sources.append({
             "field": name,
+            "role": LEDGER_ROLES[name],
             "paginated": is_conn and "after" in fdef.args,
             "connection": is_conn,
             "operation": op,
@@ -390,6 +412,7 @@ def _ledger(s: Schema) -> dict:
         "available": bool(sources),
         "reason": None if sources else "Ve schématu jsem nenašel historii plateb.",
         "candidates": candidates,
+        "skipped": skipped,
         "sources": sources,
         "balance_query": balance_query,
     }

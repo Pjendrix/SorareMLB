@@ -26,6 +26,7 @@ K_SAMPLE = "ledger:sample"
 
 CATEGORIES = {
     "deposit": "Vklad",
+    "card_payment": "Platba kartou",
     "withdrawal": "Výběr",
     "purchase": "Nákup karet",
     "sale": "Prodej karet",
@@ -33,7 +34,11 @@ CATEGORIES = {
     "fee": "Poplatek",
     "refund": "Vrácení",
     "other": "Ostatní",
+    "essence": "Essence",
+    "gems": "Gemy",
 }
+# Kategorie, které nejsou peníze, ale množství.
+QUANTITY = ("essence", "gems")
 
 RULES = [
     ("refund", r"refund|cancel|revert|chargeback"),
@@ -76,7 +81,7 @@ def _num(value) -> float | None:
         return None
 
 
-def normalize(node: dict, source: str) -> dict:
+def normalize(node: dict, source: str, role: str | None = None) -> dict:
     flat = _flatten(node)
     date_value = next(
         (v for k, v in flat.items() if re.search(r"At$|date", k.split(".")[-1], re.I) and v), None
@@ -112,7 +117,20 @@ def normalize(node: dict, source: str) -> dict:
                 eur = amount
 
     sign_hint = " ".join(str(v) for k, v in flat.items() if re.search(r"sign|direction|debit|credit", k, re.I))
-    category = classify(type_text + " " + sign_hint, eur or usd or eth or 0)
+    category = role or classify(type_text + " " + sign_hint, eur or usd or eth or 0)
+
+    qty = None
+    if category in QUANTITY:
+        # Essence a gemy: množství se znaménkem (+ získáno, − utraceno).
+        qty = next(
+            (_num(v) for k, v in flat.items()
+             if re.search(r"quantity|amount|count|delta|value", k.split(".")[-1], re.I)
+             and _num(v) is not None),
+            None,
+        )
+        if qty is not None and re.search(r"spend|spent|burn|debit|used|consum|out", type_text + " " + sign_hint, re.I):
+            qty = -abs(qty)
+        eur = usd = eth = None
 
     return {
         "id": f"{source}:{flat.get('id') or uuid.uuid5(uuid.NAMESPACE_OID, str(sorted(flat.items())))}",
@@ -124,6 +142,9 @@ def normalize(node: dict, source: str) -> dict:
         "usd": _abs(usd),
         "eth": _abs(eth),
         "status": flat.get("status"),
+        "role": role,
+        "qty": qty,
+        "rarity": str(flat.get("rarity") or "").lower() or None,
     }
 
 
@@ -160,7 +181,7 @@ def sync(config: Config, full: bool = False) -> dict:
                 nodes, next_cursor = [block] if block else [], None
             if nodes and cursor is None:
                 get_store().set(f"{K_SAMPLE}:{src['field']}", nodes[:3], ttl_seconds=7 * 24 * 3600)
-            return [normalize(n, src["field"]) for n in nodes], next_cursor
+            return [normalize(n, src["field"], src.get("role")) for n in nodes], next_cursor
 
         remaining = budget - (time.monotonic() - started)
         if full and remaining <= 3:
@@ -241,44 +262,77 @@ def delete_manual(entry_id: str) -> bool:
 
 def summarize(rows: list[dict], reward_money_eur: float = 0.0, exclude_failed: bool = True) -> dict:
     if exclude_failed:
-        rows = [r for r in rows if not re.search(r"fail|cancel|reject", str(r.get("status") or ""), re.I)]
+        rows = [
+            r for r in rows
+            if not re.search(r"fail|cancel|reject|pending|processing|expired", str(r.get("status") or ""), re.I)
+        ]
+
+    # Výběry mohou být v obecném výpisu účtu i ve specializovaném zdroji.
+    # Specializovaný zdroj se započítá jen tehdy, když obecný tu kategorii nemá.
+    general = {r["category"] for r in rows if r.get("source") not in ("manual",) and not r.get("role")}
+    counted, duplicates = [], 0
+    for r in rows:
+        if r.get("role") and r["role"] in general:
+            duplicates += 1
+            continue
+        counted.append(r)
+    rows = counted
 
     totals = {c: {"eur": 0.0, "usd": 0.0, "eth": 0.0, "count": 0} for c in CATEGORIES}
+    quantities: dict[str, dict] = {c: {"gained": 0.0, "spent": 0.0, "count": 0} for c in QUANTITY}
     by_year: dict[str, dict] = defaultdict(lambda: defaultdict(float))
     by_month: dict[str, dict] = defaultdict(lambda: defaultdict(float))
     for r in rows:
-        t = totals[r["category"]]
+        cat = r["category"]
+        if cat in QUANTITY:
+            q = quantities[cat]
+            q["count"] += 1
+            if (r.get("qty") or 0) >= 0:
+                q["gained"] += r.get("qty") or 0
+            else:
+                q["spent"] += -(r.get("qty") or 0)
+            continue
+        t = totals[cat]
         t["count"] += 1
         for cur in ("eur", "usd", "eth"):
             t[cur] += r.get(cur) or 0
         period = str(r.get("date") or "")
         if len(period) >= 7:
-            by_year[period[:4]][r["category"]] += r.get("eur") or r.get("usd") or 0
-            by_month[period[:7]][r["category"]] += r.get("eur") or r.get("usd") or 0
+            by_year[period[:4]][cat] += r.get("eur") or r.get("usd") or 0
+            by_month[period[:7]][cat] += r.get("eur") or r.get("usd") or 0
 
     def eur(c):
         return round(totals[c]["eur"] + totals[c]["usd"], 2)  # USD bereme 1:1 jen pro hrubý přehled
 
+    invested = eur("deposit") + eur("card_payment")
     balance = get_store().get_json(K_BALANCE)
     headline = {
         "deposited": eur("deposit"),
+        "card_payments": eur("card_payment"),
+        "invested": round(invested, 2),
         "withdrawn": eur("withdrawal"),
-        "spent": eur("purchase"),
+        "spent": round(eur("purchase") + eur("card_payment"), 2),
         "sold": eur("sale"),
         "fees": eur("fee"),
         "refunds": eur("refund"),
         "rewards_money": round(reward_money_eur, 2),
-        "cash_result": round(eur("withdrawal") - eur("deposit"), 2),
-        "market_result": round(eur("sale") - eur("purchase") - eur("fee") + eur("refund"), 2),
+        "cash_result": round(eur("withdrawal") - invested, 2),
+        "market_result": round(
+            eur("sale") - eur("purchase") - eur("card_payment") - eur("fee") + eur("refund"), 2
+        ),
         "has_usd": any(totals[c]["usd"] for c in totals),
         "eth": {c: round(totals[c]["eth"], 6) for c in totals if totals[c]["eth"]},
+        "skipped_duplicates": duplicates,
     }
     return {
         "headline": headline,
+        "quantities": {k: {kk: round(vv, 2) if kk != "count" else vv for kk, vv in v.items()}
+                       for k, v in quantities.items()},
         "categories": [
-            {"key": c, "label": CATEGORIES[c], **{k: round(v, 6) if k == "eth" else round(v, 2) if k != "count" else v
-                                                  for k, v in totals[c].items()}}
-            for c in CATEGORIES
+            {"key": c, "label": CATEGORIES[c],
+             **{k: (round(v, 6) if k == "eth" else round(v, 2)) if k != "count" else v
+                for k, v in totals[c].items()}}
+            for c in CATEGORIES if c not in QUANTITY
         ],
         "years": [{"year": y, **{k: round(v, 2) for k, v in d.items()}} for y, d in sorted(by_year.items())],
         "months": [{"month": m, **{k: round(v, 2) for k, v in d.items()}} for m, d in sorted(by_month.items())],
