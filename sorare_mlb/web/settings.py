@@ -78,6 +78,7 @@ const yes = (v) => `<span class="state ${v ? "on" : ""}">${v ? "Nastaveno" : "Ch
     const el = $("#health"); el.classList.remove("skeleton");
     el.innerHTML = `${h.store_warning ? `<div class="notice">${esc(h.store_warning)}</div>` : ""}
       <table><thead><tr><th>Proměnná</th><th>Stav</th></tr></thead><tbody>
+      <tr><td>Verze aplikace</td><td><code>${esc(h.app_version || "neznámá")}</code></td></tr>
       <tr><td>Úložiště</td><td>${esc(h.store)}</td></tr>
       ${Object.entries(h.required).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${yes(v)}</td></tr>`).join("")}
       ${Object.entries(h.optional).map(([k, v]) => `<tr><td>${esc(k)} <span class="muted">volitelné</span></td><td>${yes(v)}</td></tr>`).join("")}
