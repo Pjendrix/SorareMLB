@@ -57,6 +57,10 @@ async def normalize_vercel_path(request: Request, call_next):
         request.scope["path"] = original.split("?")[0] or "/"
     return await call_next(request)
 
+# Zvyšuje se při každé změně API — podle toho se pozná, jestli Vercel
+# opravdu nasadil nové soubory.
+APP_VERSION = "2026.09.17-probes"
+
 PUBLIC_PATHS = ("/api/cron", "/api/continue")
 
 
@@ -194,6 +198,14 @@ def api_rewards(sport: str | None = None, refresh: bool = False) -> JSONResponse
         sync = _sorare_call(rewards.sync, config, sport)
     summary = rewards.summarize(_visible_rewards(config, sport), sport)
     summary["sync"] = sync
+    # Výhry z historie účtu (peníze, Essence, gemy) — funguje i bez umístění.
+    from sorare_mlb import ledger
+
+    rows = ledger.ARCHIVE.rows()
+    if sport:
+        rows = [r for r in rows if r.get("sport") in (None, sport)]
+    summary["account"] = ledger.reward_view(rows)
+    summary["account"]["synced"] = bool(rows)
     summary["backfill"] = rewards.backfill_status()
     return JSONResponse(summary)
 
@@ -217,7 +229,8 @@ def api_rewards_debug() -> JSONResponse:
 
     _require_auth()
     feats = get_features().get("rewards") or {}
-    out = {"available": feats.get("available"), "reason": feats.get("reason"), "sports": {}}
+    out = {"app_version": APP_VERSION, "available": feats.get("available"),
+           "reason": feats.get("reason"), "sports": {}}
     if not feats.get("available"):
         return JSONResponse(out)
     client = SorareClient(_config())
@@ -240,6 +253,53 @@ def api_rewards_debug() -> JSONResponse:
         except Exception as exc:  # noqa: BLE001
             out["sports"][sp] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
     out["archived"] = len(rewards.archive())
+
+    # Průzkum dalších míst, kde Sorare výhry drží.
+    from sorare_mlb.features import describe, probe_selection
+    from sorare_mlb.schema import load_schema
+
+    try:
+        schema = load_schema()
+    except Exception as exc:  # noqa: BLE001
+        out["probe_error"] = str(exc)[:300]
+        return JSONResponse(out)
+
+    probes = {}
+    try:
+        body = client.execute(
+            "query P { currentUser { rewardedRankings(first: 3) { nodes { id } } } }",
+            operation_name="P", tolerate_errors=True,
+        )
+        probes["rewardedRankings_bez_sportu"] = body
+    except Exception as exc:  # noqa: BLE001
+        probes["rewardedRankings_bez_sportu"] = str(exc)[:300]
+
+    for name in ("rewards", "unclaimedSo5Rewards", "podiumRankings", "myWheelRewards", "cardsReferralRewards"):
+        fdef = schema.field("CurrentUser", name)
+        if not fdef:
+            continue
+        target = schema.node_type("CurrentUser", name)
+        info = {
+            "definition": f"{fdef.name}: {fdef.type} args={fdef.arg_types}",
+            "node_type": describe(schema, target),
+        }
+        required = [a for a, t in fdef.arg_types.items() if t.endswith("!")
+                    and a not in ("first", "after", "last", "before")]
+        if required:
+            info["skipped"] = f"povinné argumenty {required}"
+        else:
+            selection = probe_selection(schema, target, depth=3)
+            conn = schema.has(fdef.base, "nodes")
+            args = "(first: 3)" if "first" in fdef.args else ""
+            inner = f"nodes {{ {selection} }}" if conn else selection
+            query = f"query Probe {{ currentUser {{ {name}{args} {{ {inner} }} }} }}"
+            info["query"] = query
+            try:
+                info["result"] = client.execute(query, operation_name="Probe", tolerate_errors=True)
+            except Exception as exc:  # noqa: BLE001
+                info["result"] = f"{type(exc).__name__}: {exc}"[:600]
+        probes[name] = info
+    out["probes"] = probes
     return JSONResponse(out)
 
 
@@ -323,6 +383,7 @@ def api_ledger_debug(refresh: bool = False) -> JSONResponse:
 
     feats = get_features(refresh=refresh).get("ledger") or {}
     return JSONResponse({
+        "app_version": APP_VERSION,
         "candidates": feats.get("candidates"),
         "sources": [{k: src.get(k) for k in ("field", "role", "query")} for src in feats.get("sources") or []],
         "skipped": feats.get("skipped"),
@@ -343,6 +404,7 @@ def api_schema_features(refresh: bool = False) -> JSONResponse:
     rewards_info = feats.get("rewards") or {}
     return JSONResponse(
         {
+            "app_version": APP_VERSION,
             "vault_field": (feats.get("vault") or {}).get("field"),
             "rewards_available": rewards_info.get("available", False),
             "rewards_reason": rewards_info.get("reason"),
@@ -818,6 +880,7 @@ def health() -> JSONResponse:
     store_kind = type(get_store()).__name__
     return JSONResponse(
         {
+            "app_version": APP_VERSION,
             "ok": all(os.environ.get(k) for k in required) and auth["authenticated"],
             "auth": auth,
             "store": store_kind,
