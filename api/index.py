@@ -18,6 +18,7 @@ Endpointy:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -59,7 +60,7 @@ async def normalize_vercel_path(request: Request, call_next):
 
 # Zvyšuje se při každé změně API — podle toho se pozná, jestli Vercel
 # opravdu nasadil nové soubory.
-APP_VERSION = "2026.09.17-probes"
+APP_VERSION = "2026.09.17-diag"
 
 PUBLIC_PATHS = ("/api/cron", "/api/continue")
 
@@ -221,7 +222,23 @@ def _visible_rewards(config, sport: str | None = None) -> list[dict]:
 
 
 @app.get("/api/rewards/debug")
-def api_rewards_debug() -> JSONResponse:
+def api_rewards_debug(probes: bool = True) -> JSONResponse:
+    """Nikdy nepadá — případnou chybu vrátí jako text, ať je co poslat dál."""
+    try:
+        return _rewards_debug(probes)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        return JSONResponse(
+            {"app_version": APP_VERSION, "crashed": f"{type(exc).__name__}: {exc}"[:400],
+             "traceback": traceback.format_exc()[-1500:]},
+            status_code=200,
+        )
+
+
+def _rewards_debug(with_probes: bool = True) -> JSONResponse:
     """Jedna stránka výher pro každý sport: chyba nebo ukázka syrových dat."""
     from sorare_mlb import rewards
     from sorare_mlb.client import SorareClient
@@ -244,7 +261,7 @@ def api_rewards_debug() -> JSONResponse:
             block = ((body.get("data") or {}).get(feats["root_key"]) or {}).get("rewardedRankings") or {}
             nodes = block.get("nodes") or []
             out["sports"][sp] = {
-                "errors": [e.get("message") for e in body.get("errors") or []][:5],
+                "errors": [str(e.get("message"))[:200] for e in body.get("errors") or []][:5],
                 "count_on_page": len(nodes),
                 "has_next": (block.get("pageInfo") or {}).get("hasNextPage"),
                 "sample": nodes[:1],
@@ -253,6 +270,9 @@ def api_rewards_debug() -> JSONResponse:
         except Exception as exc:  # noqa: BLE001
             out["sports"][sp] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
     out["archived"] = len(rewards.archive())
+
+    if not with_probes:
+        return JSONResponse(out)
 
     # Průzkum dalších míst, kde Sorare výhry drží.
     from sorare_mlb.features import describe, probe_selection
@@ -288,14 +308,16 @@ def api_rewards_debug() -> JSONResponse:
         if required:
             info["skipped"] = f"povinné argumenty {required}"
         else:
-            selection = probe_selection(schema, target, depth=3)
+            selection = probe_selection(schema, target, depth=2)
             conn = schema.has(fdef.base, "nodes")
-            args = "(first: 3)" if "first" in fdef.args else ""
+            args = "(first: 2)" if "first" in fdef.args else ""
             inner = f"nodes {{ {selection} }}" if conn else selection
             query = f"query Probe {{ currentUser {{ {name}{args} {{ {inner} }} }} }}"
             info["query"] = query
             try:
-                info["result"] = client.execute(query, operation_name="Probe", tolerate_errors=True)
+                result = client.execute(query, operation_name="Probe", tolerate_errors=True)
+                # Odpověď může být obří — ořízneme ji, ať projde přes Vercel.
+                info["result"] = json.dumps(result, ensure_ascii=False)[:8000]
             except Exception as exc:  # noqa: BLE001
                 info["result"] = f"{type(exc).__name__}: {exc}"[:600]
         probes[name] = info
@@ -867,6 +889,34 @@ def starters(
         )
 
     return JSONResponse({"results": results})
+
+
+@app.get("/api/version")
+def api_version() -> JSONResponse:
+    """Verze nasazených souborů — pozná i částečný deploy."""
+    import inspect
+
+    from sorare_mlb import features as features_mod
+    from sorare_mlb import ledger as ledger_mod
+    from sorare_mlb import schema as schema_mod
+
+    def has(mod, attr) -> bool:
+        return hasattr(mod, attr)
+
+    return JSONResponse(
+        {
+            "app_version": APP_VERSION,
+            "python": sys.version.split()[0],
+            "modules": {
+                "features_version": getattr(features_mod, "FEATURES_VERSION", None),
+                "schema_enum_values": "values" in inspect.getsource(schema_mod.TypeDef),
+                "features_probe": has(features_mod, "probe_selection"),
+                "features_expand": has(features_mod, "EXPAND_VALUES"),
+                "ledger_reward_view": has(ledger_mod, "reward_view"),
+                "ledger_archive_prefix": getattr(ledger_mod.ARCHIVE, "prefix", None),
+            },
+        }
+    )
 
 
 @app.get("/api/health")
