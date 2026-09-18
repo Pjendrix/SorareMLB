@@ -1,44 +1,57 @@
-# Přesný spouštěč. Vercel Hobby cron umí jen jednou denně a čas negarantuje;
-# GitHub Actions cron je zdarma a přesný na minuty, takže deadline-critical
-# běhy řídíme odsud a Vercel jen vykonává práci.
+# Spouštěč řízený skutečnou uzávěrkou gameweeku.
 #
-# Nastav v repozitáři Secrets: APP_BASE_URL, INTERNAL_SECRET
-name: Sorare lineup trigger
+# Workflow jen často „tiká“; kdy se sestavy staví, rozhoduje aplikace podle
+# `cutOffDate` ze Sorare API (config.yaml → schedule). Pevné časy už nejsou
+# potřeba a nerozbije je posun prvního zápasu.
+#
+# Okno 15–23 UTC pokrývá uzávěrky MLB (odpolední i večerní zápasy ET) a drží
+# spotřebu pod limitem 2000 min/měsíc pro privátní repozitáře
+# (36 běhů × ~1 min × 30 dní). Veřejný repozitář limit nemá.
+#
+# Secrets: APP_BASE_URL, INTERNAL_SECRET
+name: Sorare lineup tick
 
 on:
   schedule:
-    # Sorare MLB gameweeky: Po–Čt a Pá–Ne.
-    # Časy jsou v UTC. Uprav si je podle reálných deadlinů svého fixture.
-    # Pondělí 21:40 UTC (cca 20 min před typickým prvním zápasem 17:40 ET)
-    - cron: "40 21 * * 1"
-    # Pátek 21:40 UTC
-    - cron: "40 21 * * 5"
+    - cron: "*/15 15-23 * * *"
   workflow_dispatch:
-    inputs:
-      mode:
-        description: "auto (odešle) nebo propose (jen navrhne)"
-        required: false
-        default: auto
+
+concurrency:
+  group: sorare-tick
+  cancel-in-progress: false
 
 jobs:
-  trigger:
+  tick:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Zavolej build endpoint
+      - name: Tik
+        id: tick
         run: |
-          code=$(curl -sS -o /tmp/out.json -w "%{http_code}" \
+          code=$(curl -sS -m 70 -o /tmp/out.json -w "%{http_code}" \
             -H "X-Internal-Secret: ${{ secrets.INTERNAL_SECRET }}" \
-            "${{ secrets.APP_BASE_URL }}/api/cron")
-          cat /tmp/out.json
+            "${{ secrets.APP_BASE_URL }}/api/tick")
+          cat /tmp/out.json; echo
           if [ "$code" != "200" ]; then
             echo "::error::Endpoint vrátil HTTP $code"
             exit 1
           fi
+          action=$(python3 -c "import json;print(json.load(open('/tmp/out.json')).get('action',''))")
+          echo "action=$action" >> "$GITHUB_OUTPUT"
 
-      - name: Počkej a zkontroluj výsledek
+      - name: Zkontroluj výsledek jobu
+        if: steps.tick.outputs.action == 'build' || steps.tick.outputs.action == 'recheck'
         run: |
-          sleep 180
-          curl -sS "${{ secrets.APP_BASE_URL }}/api/status" | tee /tmp/status.json
-          state=$(python -c "import json;print(json.load(open('/tmp/status.json'))['state'])")
-          echo "Stav jobu: $state"
-          if [ "$state" = "FAILED" ]; then exit 1; fi
+          # Job pokračuje sám přes /api/continue; počkáme, až doběhne.
+          for i in $(seq 1 12); do
+            sleep 20
+            curl -sS -H "X-Internal-Secret: ${{ secrets.INTERNAL_SECRET }}" \
+              "${{ secrets.APP_BASE_URL }}/api/status" -o /tmp/status.json
+            state=$(python3 -c "import json;print(json.load(open('/tmp/status.json')).get('state','?'))" 2>/dev/null || echo "?")
+            echo "Stav jobu: $state"
+            case "$state" in
+              DONE|NEEDS_REVIEW) exit 0 ;;
+              FAILED) cat /tmp/status.json; exit 1 ;;
+            esac
+          done
+          echo "::warning::Job do 4 minut nedoběhl"
