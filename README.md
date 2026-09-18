@@ -11,7 +11,8 @@ který skládá sestavy pro **Hot Streaks** a **Challenger**.
 | `/vyhry` | Peníze, Essence, karty a coiny: po soutěžích, gameweecích, kartách a hráčích |
 | `/bilance` | Vloženo, vybráno, utraceno za karty, prodeje, poplatky; po letech a měsících; ruční záznamy |
 | `/mlb`, `/fotbal` | Sbírka: rarity, pozice, forma (L5/L15, trend), karty bez zápasu, otevřené turnaje, filtr karet |
-| `/mlb/sestavy` | Builder sestav MLB (návrh, kontrola, odeslání) |
+| `/mlb/sestavy` | Builder sestav MLB: projekce, rozsah floor–ceiling, zápasy v GW, záměna karet, kdy poběží automat |
+| `/mlb/kalibrace` | Projekce vs. skutečné body po skončení gameweeku (MAE, bias, graf) |
 | `/fotbal/sestavy` | Placeholder: plánovaný formát, otevřené turnaje, co zbývá |
 | `/mlb/historie`, `/fotbal/historie` | Vývoj sbírky, sestavy ze Sorare, běhy automatu |
 | `/nastaveni` | Přihlášení, kontrola env proměnných, sledované turnaje |
@@ -187,21 +188,21 @@ Endpoint stáhne https://api.sorare.com/graphql/schema a vrátí definici jednoh
 typu. Když Sorare něco přejmenuje, tohle ti ukáže aktuální tvar a opravíš
 `sorare_mlb/queries.py`.
 
-### 6. Přesný cron přes GitHub Actions
+### 6. Spouštění podle uzávěrky
 
-Vercel Hobby cron umí **jen jednou denně** a čas negarantuje — může se opozdit
-i o hodinu. Pro běh navázaný na deadline to nestačí, proto je v repozitáři
-`.github/workflows/trigger.yml`.
+Automat se řídí skutečnou `cutOffDate` ze Sorare API, ne pevnými časy.
+`.github/workflows/trigger.yml` volá každých 15 minut (15–23 UTC) `/api/tick`
+a aplikace rozhodne podle `config.yaml → schedule`:
 
-V GitHubu → Settings → Secrets and variables → Actions přidej:
-- `APP_BASE_URL`
-- `INTERNAL_SECRET`
+- **build** (60 min před uzávěrkou): postaví sestavy, podle `CRON_MODE`
+  je odešle nebo pošle ke schválení,
+- **recheck** (20 min před uzávěrkou, jen `CRON_MODE=auto`): postaví je
+  znovu s čerstvými startéry a přepíše. Přepis funguje, jen když mutace ve
+  schématu bere ID sestavy — `/nastaveni` ukáže, jestli ano.
 
-Pak si v tom souboru uprav časy. Výchozí jsou pondělí a pátek 21:40 UTC, což
-odpovídá zhruba 20 minutám před typickým prvním zápasem gameweeku. **Zkontroluj
-si to proti reálným deadlinům svého fixture** — cron nezná rozpis MLB.
-
-Vercel cron v `vercel.json` zůstává jako záloha na 14:00 UTC.
+Každá fáze proběhne pro gameweek jednou. V GitHubu → Settings → Secrets
+přidej `APP_BASE_URL` a `INTERNAL_SECRET`. Vercel cron (12:00 UTC) je záloha:
+udělá jeden tik a vyhodnotí kalibraci.
 
 ---
 
@@ -261,7 +262,7 @@ Bez `KV_REST_API_*` se použije `.local-store.json`, takže Redis lokálně
 nepotřebuješ.
 
 ```bash
-pytest -q     # 52 testů (optimalizátor, pipeline, 2FA), žádná síť
+pytest -q     # optimalizátor, pipeline, scheduler, kalibrace, 2FA — žádná síť
 ```
 
 ---
@@ -277,8 +278,8 @@ pytest -q     # 52 testů (optimalizátor, pipeline, 2FA), žádná síť
    optimalizátorem a spadne až při odeslání.
 4. **Párování jmen** Sorare ↔ MLB jede přes normalizované jméno. Duplicity
    (Luis García) doplň do `mlb.manual_player_map`.
-5. **Projekce nejsou edge.** Bez placeného zdroje jde o formu + matchup.
-   Je to lepší než náhoda, ale nečekej zázraky.
+5. **Projekce nejsou edge.** Forma × počet zápasů v GW + matchup + Sorare
+   projekce + bonus karty. Jestli to funguje, ukáže `/mlb/kalibrace`.
 6. **Auto-submit je tvoje odpovědnost.** Pipeline se snaží nezkazit gameweek,
    ale sleduj notifikace — hlavně první dva týdny.
 7. **Nikdy necommituj `.env`.** Je v `.gitignore`, ale ověř si to.
@@ -296,7 +297,9 @@ sorare_mlb/
                          (MLB jede přes So5 s argumentem sport: BASEBALL)
   mlb.py                 MLB StatsAPI
   projections.py         výpočet projekcí
-  optimizer.py           ILP přes všechny turnaje
+  optimizer.py           ILP přes všechny turnaje (mean ∓ λ·σ, šance na práh)
+  scheduler.py           rozhodování podle uzávěrky (/api/tick)
+  calibration.py         projekce vs. skutečnost po GW
   validator.py           kontrola před deadlinem
   notify.py              Discord / Telegram
   ui.py                  hlavní stránka
