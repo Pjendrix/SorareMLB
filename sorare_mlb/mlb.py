@@ -134,6 +134,20 @@ def build_name_index(team_ids: list[int]) -> dict[str, dict]:
     return index
 
 
+def match_player(name_index: dict[str, dict], sorare_slug: str, name: str) -> dict | None:
+    """Sorare hráč -> záznam z MLB rosteru. Jediné místo párování.
+
+    Projekce i validátor musí párovat stejně, jinak ručně namapovaný hráč
+    projde optimalizací a validátor ho pak hlásí jako nenapárovaného.
+    """
+    manual = manual_player_map.get(sorare_slug)
+    if manual:
+        for entry in name_index.values():
+            if entry.get("id") == manual:
+                return entry
+    return name_index.get(normalize_name(name or ""))
+
+
 # ------------------------------------------------------------------ stats
 
 

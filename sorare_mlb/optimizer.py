@@ -122,10 +122,21 @@ class LineupOptimizer:
                 "Nejčastější příčina: špatné mapování pozic v config.yaml → `lineup.slots`."
             )
 
+        # Indexy nad proměnnými. Dřív se u každého omezení procházely všechny
+        # proměnné znovu (kvadratické); s větším portfoliem to žralo čas
+        # z 40s rozpočtu kroku.
+        by_ls: dict[tuple[int, str], list] = defaultdict(list)
+        by_card: dict[str, list] = defaultdict(list)
+        by_lc: dict[tuple[int, str], list] = defaultdict(list)
+        for (c, l, s), var in x.items():
+            by_ls[(l, s)].append(var)
+            by_card[c].append(var)
+            by_lc[(l, c)].append(var)
+
         # 1) každý slot právě jednou
         for li, (tour, idx) in enumerate(lineup_keys):
             for slot in self.slots:
-                vars_in_slot = [v for (c, l, s), v in x.items() if l == li and s == slot]
+                vars_in_slot = by_ls.get((li, slot)) or []
                 if not vars_in_slot:
                     raise OptimizationError(
                         f"{tour.name} #{idx + 1}: slot {slot} nelze obsadit — "
@@ -135,10 +146,8 @@ class LineupOptimizer:
 
         # 1b) Startující nadhazovači: dokud je k dispozici někdo s ohlášeným
         # startem, nikdo jiný do SP slotu nesmí. Penalizace v projekci na tohle
-        # nestačila — silná forma ji dokázala přebít.
-        # Slot jen pro startující nadhazovače: všechny povolené pozice
-        # obsahují STARTING_PITCHER. Navázáno na název pozice, ne na
-        # pomocný seznam v configu, který nemusí být vyplněný.
+        # nestačila — silná forma ji dokázala přebít. Slot je „jen pro SP“,
+        # když všechny jeho povolené pozice obsahují STARTING_PITCHER.
         sp_slots = [
             slot for slot, allowed in self.slots.items()
             if allowed and all("STARTING_PITCHER" in p.upper() for p in allowed)
@@ -146,21 +155,15 @@ class LineupOptimizer:
         starters = {c.slug for c in self.cards if c.sorare_probable_starter is True}
         if starters:
             for slot in sp_slots:
-                if not any(
-                    c in starters
-                    for (c, l, s) in x
-                    if s == slot
-                ):
-                    continue  # na tenhle slot nikdo se startem není
+                if not any(c in starters for (c, l, s) in x if s == slot):
+                    continue
                 for (c, l, s), var in x.items():
                     if s == slot and c not in starters:
                         problem += var == 0, f"needstart_{l}_{slot}_{_safe(c)}"
 
         # 2) karta nejvýš jednou celkově
-        for card in self.cards:
-            uses = [v for (c, l, s), v in x.items() if c == card.slug]
-            if uses:
-                problem += pulp.lpSum(uses) <= 1, f"unique_{_safe(card.slug)}"
+        for card_slug, uses in by_card.items():
+            problem += pulp.lpSum(uses) <= 1, f"unique_{_safe(card_slug)}"
 
         # 2b) jeden hráč jen jednou v rámci jedné sestavy.
         # Sorare tohle odmítá ("One player can only appear once") a portfolio
@@ -174,7 +177,7 @@ class LineupOptimizer:
             for player_slug, slugs in by_player.items():
                 if len(slugs) < 2:
                     continue
-                uses = [v for (c, l, s), v in x.items() if l == li and c in set(slugs)]
+                uses = [v for c in slugs for v in by_lc.get((li, c), [])]
                 if len(uses) > 1:
                     problem += (
                         pulp.lpSum(uses) <= 1,
@@ -190,21 +193,18 @@ class LineupOptimizer:
 
         for li, _ in enumerate(lineup_keys):
             for team, team_cards in by_team.items():
-                uses = [
-                    v for (c, l, s), v in x.items()
-                    if l == li and c in {tc.slug for tc in team_cards}
-                ]
+                uses = [v for tc in team_cards for v in by_lc.get((li, tc.slug), [])]
                 if len(uses) > max_from_team:
                     problem += pulp.lpSum(uses) <= max_from_team, f"team_{li}_{_safe(team)}"
 
         # 5b) in-season minimum.
         # Sorare to hlásí jako "minimum required is 6" — vyjadřuje se to jako
         # dolní mez na karty se season bonusem, ne jako strop na ty staré.
+        fresh = [c.slug for c in self.cards if c.in_season]
         for li, (tour, _) in enumerate(lineup_keys):
             if tour.min_in_season is None:
                 continue
-            fresh = {c.slug for c in self.cards if c.in_season}
-            uses = [v for (c, l, s), v in x.items() if l == li and c in fresh]
+            uses = [v for c in fresh for v in by_lc.get((li, c), [])]
             problem += pulp.lpSum(uses) >= tour.min_in_season, f"inseason_{li}"
 
         # 6) floor pro bezpečné sestavy
@@ -214,19 +214,23 @@ class LineupOptimizer:
                 if tour.risk_mode != "safe":
                     continue
                 for (c, l, s), var in x.items():
-                    if l != li:
-                        continue
-                    if self.projections[c].floor < min_floor:
+                    if l == li and self.projections[c].floor < min_floor:
                         problem += var == 0, f"floor_{li}_{_safe(c)}_{s}"
 
-        # účelová funkce
+        # účelová funkce: mean ∓ λ·σ.
+        # safe (Hot Streaks) trestá rozptyl — cílem je překonat práh, ne
+        # maximalizovat součet. upside (Challenger) rozptyl naopak odměňuje.
+        lam_safe = float(self.config.get_path("optimizer.safe_lambda", 0.6))
+        lam_up = float(self.config.get_path("optimizer.upside_lambda", 0.4))
         objective = []
         for (c, li, slot), var in x.items():
             tour = lineup_keys[li][0]
             proj = self.projections[c]
-            value = proj.floor if tour.risk_mode == "safe" else proj.ceiling
-            # Průměr držíme v mixu, aby safe režim nevybíral jen nudné jistoty.
-            value = 0.65 * value + 0.35 * proj.mean
+            sigma = proj.sigma or max(0.0, proj.ceiling - proj.mean) / 1.1
+            if tour.risk_mode == "safe":
+                value = proj.mean - lam_safe * sigma
+            else:
+                value = proj.mean + lam_up * sigma
             objective.append(tour.weight * value * var)
 
         stack_terms, stack_constraints = self._stack_terms(x, lineup_keys, by_team)
@@ -279,6 +283,10 @@ class LineupOptimizer:
         max_team = int(self.config.get_path("stack.max_from_team", 4))
         hitters = set(self.config.get_path("lineup.hitter_positions", []))
 
+        by_lc: dict[tuple[int, str], list] = defaultdict(list)
+        for (c, l, s), var in x.items():
+            by_lc[(l, c)].append(var)
+
         terms, constraints = [], []
         for li, (tour, _) in enumerate(lineup_keys):
             if apply_to and tour.name not in apply_to:
@@ -287,7 +295,7 @@ class LineupOptimizer:
                 hitter_slugs = {
                     c.slug for c in team_cards if set(c.positions) & hitters
                 }
-                uses = [v for (c, l, s), v in x.items() if l == li and c in hitter_slugs]
+                uses = [v for c in hitter_slugs for v in by_lc.get((li, c), [])]
                 if len(uses) < 2:
                     continue
                 count_expr = pulp.lpSum(uses)
@@ -302,9 +310,8 @@ class LineupOptimizer:
     # ------------------------------------------------------------------ helpers
 
     def _eligible(self, card: Card, tour: Tournament) -> bool:
-        if tour.allowed_rarities and card.rarity not in tour.allowed_rarities:
-            return False
-        return True
+        allowed = {r.lower() for r in (tour.allowed_rarities or [])}
+        return not allowed or card.rarity.lower() in allowed
 
     def _extract(self, x, lineup_keys) -> list[Lineup]:
         by_card = {c.slug: c for c in self.cards}
@@ -315,13 +322,20 @@ class LineupOptimizer:
                 if l != li or var.value() is None or var.value() < 0.5:
                     continue
                 card = by_card[c]
+                proj = self.projections[c]
                 slots.append(
                     LineupSlot(
                         slot=slot,
                         card_slug=c,
                         player_name=card.player.name,
                         team=card.player.team_name,
-                        projected=self.projections[c].mean,
+                        projected=proj.mean,
+                        player_slug=card.player.slug,
+                        floor=proj.floor,
+                        ceiling=proj.ceiling,
+                        sigma=proj.sigma,
+                        games=proj.games,
+                        notes=list(proj.notes),
                     )
                 )
             if not slots:
@@ -341,3 +355,21 @@ class LineupOptimizer:
 
 def _safe(text: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in text)
+
+
+def win_probability(lineup: Lineup, target: float | None) -> float | None:
+    """P(součet sestavy ≥ target) v normální aproximaci.
+
+    Jen orientační: zápasy hráčů nejsou nezávislé (stack), takže u stacku
+    je skutečný rozptyl vyšší, než tady vychází.
+    """
+    if not target:
+        return None
+    import math
+
+    mean = sum(s.projected for s in lineup.slots)
+    var = sum((s.sigma or 0.0) ** 2 for s in lineup.slots)
+    if var <= 0:
+        return 1.0 if mean >= target else 0.0
+    z = (target - mean) / math.sqrt(var)
+    return round(0.5 * math.erfc(z / math.sqrt(2)), 3)

@@ -26,9 +26,9 @@ import requests
 from . import history, mlb, notify
 from .client import SorareClient, SorareError, card_from_dict
 from .models import Card, Config, Lineup, LineupSlot, Projection, Tournament
-from .optimizer import LineupOptimizer, OptimizationError
+from .optimizer import LineupOptimizer, OptimizationError, win_probability
 from .projections import ProjectionEngine
-from .store import K_CARDS, K_JOB, K_LAST_RESULT, K_LATEST_JOB, get_store
+from .store import K_CARDS, K_JOB, K_JOB_LOCK, K_LAST_RESULT, K_LATEST_JOB, get_store
 from .validator import LineupValidator
 
 log = logging.getLogger(__name__)
@@ -61,10 +61,35 @@ class Job:
     probable_starters: list[str] = field(default_factory=list)
     # Vrátil dotaz na startéry použitelná data? Když ne, nepenalizujeme.
     starters_known: bool = False
+    # Přepsat už odeslané sestavy (druhý běh těsně před uzávěrkou).
+    overwrite: bool = False
+    # Kdo job spustil: manual | cron | tick-build | tick-recheck
+    trigger: str = "manual"
+    # Strukturovaný log pro UI: {t, level, text}; level info|warn|error|detail
+    events: list[dict] = field(default_factory=list)
+    # Náhradníci pro každý slot: "{lineup_pos}:{slot}" -> [{card_slug, ...}]
+    alternatives: dict = field(default_factory=dict)
 
-    def log_step(self, text: str) -> None:
-        self.steps.append(f"{datetime.now():%H:%M:%S} {text}")
-        self.updated_at = datetime.now().isoformat(timespec="seconds")
+    def log_step(self, text: str, level: str | None = None) -> None:
+        now = datetime.now()
+        self.steps.append(f"{now:%H:%M:%S} {text}")
+        self.events.append({
+            "t": now.isoformat(timespec="seconds"),
+            "level": level or _guess_level(text),
+            "text": text.strip(),
+        })
+        self.updated_at = now.isoformat(timespec="seconds")
+
+
+def _guess_level(text: str) -> str:
+    low = text.lower()
+    if low.startswith(("chyba", "❌")) or "selhal" in low:
+        return "error"
+    if "varování" in low or "nenalezen" in low or "vynecháno" in low:
+        return "warn"
+    if text.startswith("  "):
+        return "detail"
+    return "info"
 
 
 # --------------------------------------------------------------------- storage
@@ -80,7 +105,9 @@ def load(job_id: str) -> Job | None:
     data = get_store().get_json(K_JOB.format(job_id=job_id))
     if not data:
         return None
-    return Job(**data)
+    # Joby uložené starší verzí můžou mít jiná pole.
+    known = set(Job.__dataclass_fields__)
+    return Job(**{k: v for k, v in data.items() if k in known})
 
 
 def latest_job() -> Job | None:
@@ -88,13 +115,18 @@ def latest_job() -> Job | None:
     return load(job_id) if job_id else None
 
 
-def create_job(mode: str = "auto") -> Job:
+def create_job(mode: str = "auto", overwrite: bool = False, trigger: str = "manual") -> Job:
     job = Job(
         id=uuid.uuid4().hex[:12],
         mode=mode,
         created_at=datetime.now().isoformat(timespec="seconds"),
+        overwrite=overwrite,
+        trigger=trigger,
     )
-    job.log_step(f"Job vytvořen (režim: {mode})")
+    job.log_step(
+        f"Job vytvořen (režim: {mode}, spouštěč: {trigger}"
+        + (", přepisuje odeslané" if overwrite else "") + ")"
+    )
     save(job)
     return job
 
@@ -103,17 +135,33 @@ def create_job(mode: str = "auto") -> Job:
 
 
 def advance(job: Job, config: Config) -> Job:
-    """Posune job co nejdál v rámci časového rozpočtu."""
+    """Posune job co nejdál v rámci časového rozpočtu.
+
+    Zámek v Redisu brání tomu, aby job posouvaly dvě invokace naráz
+    (cron + /api/continue). Bez něj šlo v kroku SUBMIT odeslat dvakrát.
+    """
+    store = get_store()
+    lock_key = K_JOB_LOCK.format(job_id=job.id)
+    if not store.acquire(lock_key, int(BUDGET_SECONDS) + 20):
+        log.info("Job %s právě běží jinde, přeskakuji", job.id)
+        return job
+
+    # Stav mohl mezitím posunout někdo jiný — pracujeme s čerstvou verzí.
+    fresh = load(job.id)
+    if fresh is not None:
+        job = fresh
+
     deadline = time.monotonic() + BUDGET_SECONDS
     started_in = job.state
+    handoff = False
 
     try:
-        while job.state not in ("DONE", "FAILED", "NEEDS_REVIEW"):
+        while job.state not in TERMINAL:
             if time.monotonic() > deadline:
                 job.log_step("Časový limit kroku, pokračuji další invokací")
                 save(job)
-                _self_invoke(job.id)
-                return job
+                handoff = True
+                break
 
             handler = _HANDLERS.get(job.state)
             if handler is None:
@@ -124,10 +172,21 @@ def advance(job: Job, config: Config) -> Job:
     except Exception as exc:  # noqa: BLE001 — job nesmí spadnout bez stopy
         job.state = "FAILED"
         job.error = f"{type(exc).__name__}: {exc}"
-        job.log_step(f"Chyba: {job.error}")
+        job.log_step(f"Chyba: {job.error}", "error")
         log.exception("Job %s selhal", job.id)
         save(job)
         notify.notify(f"❌ **Sorare job selhal**\n```\n{job.error}\n{traceback.format_exc()[-800:]}\n```")
+    finally:
+        # Zámek pustit dřív, než zavoláme další invokaci — jinak by si ho
+        # nová invokace nestihla vzít a job by zůstal viset.
+        try:
+            store.delete(lock_key)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if handoff:
+        _self_invoke(job.id)
+        return job
 
     # Do historie jen jednou — při přechodu do koncového stavu.
     if job.state in TERMINAL and started_in not in TERMINAL:
@@ -169,25 +228,42 @@ def _step_queued(job: Job, config: Config, deadline: float) -> None:
         raise SorareError(
             "Žádný otevřený baseballový leaderboard — nejspíš jsme mezi gameweeky."
         )
+    fixture, boards = nearest_fixture(boards)
     job.leaderboards = boards
-    fixture = (boards[0].get("so5Fixture") or {})
     job.fixture = fixture
     job.log_step(
-        f"Gameweek {fixture.get('gameWeek', '?')}: {len(boards)} otevřených leaderboardů"
+        f"Gameweek {fixture.get('gameWeek', '?')} ({fixture.get('slug', '?')}): "
+        f"{len(boards)} otevřených leaderboardů"
     )
     job.state = "CARDS"
 
 
+def nearest_fixture(boards: list[dict]) -> tuple[dict, list[dict]]:
+    """Fixture s nejbližší uzávěrkou a jen jeho leaderboardy.
+
+    `upcomingLeaderboards` umí vrátit dva gameweeky naráz (typicky přes
+    víkend). Brát `boards[0]` míchalo okno zápasů, startéry i leaderboardy
+    dvou různých týdnů.
+    """
+    def cutoff(board: dict) -> str:
+        return str(board.get("cutOffDate") or "9999")
+
+    first = min(boards, key=cutoff)
+    fixture = first.get("so5Fixture") or {}
+    slug = fixture.get("slug")
+    same = [b for b in boards if (b.get("so5Fixture") or {}).get("slug") == slug] if slug else boards
+    return fixture, same
+
+
 def _step_cards(job: Job, config: Config, deadline: float) -> None:
     client = SorareClient(config)
-    cards = [c for c in client.fetch_cards() if not c.in_vault]
+    # Před uzávěrkou chceme čerstvá skóre, ne dvouhodinovou cache.
+    cards = [c for c in client.fetch_cards(use_cache=False) if not c.in_vault]
     # Skóre chodí ve stejné odpovědi jako karty, takže samostatný krok odpadá.
     job.scores = client.fetch_scores(cards)
     job.pending_player_slugs = []
     job.log_step(f"Portfolio: {len(cards)} karet, {len(job.scores)} hráčů se skóre")
 
-    # Kdo v tomhle gameweeku startuje. Ptáme se lavičky konkrétního
-    # leaderboardu, jinak bychom dostali nejbližší zápas mimo gameweek.
     # Kdo v tomhle gameweeku startuje. Ptáme se zápasů fixture — lavička
     # bez kontextu sestavy vrací prázdno a `nextGame` míří mimo gameweek.
     fixture_slug = (job.fixture or {}).get("slug")
@@ -272,7 +348,16 @@ def _step_optimize(job: Job, config: Config, deadline: float) -> None:
     except OptimizationError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    job.lineups = [lu.to_dict() for lu in lineups]
+    targets = {t.slug: t.target_score for t in tournaments}
+    job.lineups = []
+    for lu in lineups:
+        data = lu.to_dict()
+        target = targets.get(lu.tournament_slug)
+        data["target_score"] = target
+        data["win_probability"] = win_probability(lu, target)
+        data["sigma"] = round(sum((s.sigma or 0) ** 2 for s in lu.slots) ** 0.5, 2)
+        job.lineups.append(data)
+    job.alternatives = build_alternatives(job.lineups, cards, projections, config, tournaments)
     job.log_step(f"Sestaveno {len(lineups)} sestav")
 
     # Nadhazovači jsou nejčastější zdroj překvapení — vypíšeme, proč byli vybráni.
@@ -288,7 +373,7 @@ def _step_optimize(job: Job, config: Config, deadline: float) -> None:
     job.state = "VALIDATE"
 
 
-def _step_validate(job: Job, config: Config, deadline: float) -> None:
+def _step_validate(job: Job, config: Config, deadline: float, notify_user: bool = True) -> None:
     cards, projections = _rebuild(job, config)
     ctx = job.mlb_context
     validator = LineupValidator(
@@ -311,6 +396,8 @@ def _step_validate(job: Job, config: Config, deadline: float) -> None:
     if blockers:
         # Blokující nález = nesestavujeme naslepo. Radši nic než nula bodů.
         job.state = "NEEDS_REVIEW"
+        if not notify_user:
+            return
         notify.notify(
             notify.format_lineups(lineups, "⚠️ Sestavy NEODESLÁNY — vyžadují zásah")
             + "\n\n"
@@ -319,7 +406,7 @@ def _step_validate(job: Job, config: Config, deadline: float) -> None:
         return
 
     job.state = "SUBMIT" if job.mode == "auto" else "NEEDS_REVIEW"
-    if job.state == "NEEDS_REVIEW":
+    if job.state == "NEEDS_REVIEW" and notify_user:
         notify.notify(
             notify.format_lineups(lineups, "📋 Návrh sestav čeká na tvoje potvrzení")
         )
@@ -359,6 +446,21 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
             )
         job.log_step(f"  {lineup.tournament_name} #{lineup.index + 1}: " + " | ".join(popis))
 
+    # Přepis existujících sestav (recheck před uzávěrkou) potřebuje jejich ID.
+    existing: dict[str, list[str]] = {}
+    id_field = None
+    if job.overwrite:
+        try:
+            from .features import get_features
+
+            id_field = (get_features().get("lineup_input") or {}).get("id_field")
+            existing = client.existing_lineup_ids() if id_field else {}
+        except Exception as exc:  # noqa: BLE001
+            job.log_step(f"VAROVÁNÍ: existující sestavy nezjištěny ({exc})")
+        if not id_field:
+            job.log_step("VAROVÁNÍ: schéma neumí ID sestavy v mutaci — přepis vypnut, "
+                         "odešlou se jen chybějící sestavy")
+
     already = {(s["tournament_slug"], s.get("index", 0)) for s in job.submitted if s.get("ok")}
     for lineup in lineups:
         if (lineup.tournament_slug, lineup.index) in already:
@@ -372,11 +474,20 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
             teams = teams_by_slug.get(lineup.tournament_slug) or []
             # index sestavy = index týmu; když tým chybí, necháme ho založit
             team_id = teams[lineup.index] if lineup.index < len(teams) else None
+            ids = existing.get(lineup.tournament_slug) or []
+            lineup_id = ids[lineup.index] if lineup.index < len(ids) else None
+            if job.overwrite and not id_field:
+                board = next((b for b in job.leaderboards if b["slug"] == lineup.tournament_slug), {})
+                if lineup.index < int(board.get("mySo5LineupsCount") or 0):
+                    job.log_step(f"Přeskočeno (už odesláno, přepis nejde): {lineup.tournament_name} #{lineup.index + 1}")
+                    continue
             result = client.submit_lineup(
                 board_id,
                 lineup.card_slugs,
                 manager_team_id=team_id,
                 requires_manager_team=requires_team.get(lineup.tournament_slug, False),
+                lineup_id=lineup_id,
+                lineup_id_field=id_field,
             )
             job.submitted.append(
                 {
@@ -417,6 +528,12 @@ def _step_submit(job: Job, config: Config, deadline: float) -> None:
         )
     notify.notify(message)
     get_store().set(K_LAST_RESULT, asdict(job), ttl_seconds=7 * 24 * 3600)
+    try:
+        from . import calibration
+
+        calibration.record(job)
+    except Exception:  # noqa: BLE001 — kalibrace nesmí shodit odeslání
+        log.exception("Uložení pro kalibraci selhalo")
 
 
 _HANDLERS = {
@@ -457,6 +574,111 @@ def _rebuild(job: Job, config: Config) -> tuple[list[Card], dict[str, Projection
     return cards, projections
 
 
+def build_alternatives(
+    lineups: list[dict],
+    cards: list[Card],
+    projections: dict[str, Projection],
+    config: Config,
+    tournaments: list[Tournament] | None = None,
+    limit: int = 3,
+) -> dict:
+    """Nejlepší nepoužité karty pro každý slot — podklad pro prohození v UI."""
+    slots_cfg = config.get_path("lineup.slots", {})
+    used = {s["card_slug"] for lu in lineups for s in lu["slots"]}
+    rarities = {t.slug: {r.lower() for r in t.allowed_rarities} for t in (tournaments or [])}
+    out: dict[str, list[dict]] = {}
+    for pos, lu in enumerate(lineups):
+        players_in = {s.get("player_slug") for s in lu["slots"]}
+        allowed_rar = rarities.get(lu["tournament_slug"]) or set()
+        for slot in lu["slots"]:
+            allowed = set(slots_cfg.get(slot["slot"], []))
+            current = projections.get(slot["card_slug"])
+            base = current.mean if current else 0.0
+            cands = [
+                c for c in cards
+                if c.slug not in used
+                and set(c.positions) & allowed
+                and (not allowed_rar or c.rarity in allowed_rar)
+                and c.player.slug not in players_in
+                and projections.get(c.slug) and projections[c.slug].playable
+            ]
+            cands.sort(key=lambda c: projections[c.slug].mean, reverse=True)
+            out[f"{pos}:{slot['slot']}"] = [
+                {
+                    "card_slug": c.slug,
+                    "player": c.player.name,
+                    "team": c.player.team_name,
+                    "projected": projections[c.slug].mean,
+                    "delta": round(projections[c.slug].mean - base, 2),
+                    "in_season": c.in_season,
+                }
+                for c in cands[:limit]
+            ]
+    return out
+
+
+def swap_card(job: Job, config: Config, pos: int, slot_name: str, card_slug: str) -> Job:
+    """Ruční prohození karty v navržené sestavě + nová kontrola."""
+    if job.state != "NEEDS_REVIEW":
+        raise ValueError(f"Prohazovat jde jen ve stavu NEEDS_REVIEW (teď {job.state}).")
+    if not 0 <= pos < len(job.lineups):
+        raise ValueError("Neznámá sestava.")
+    cards, projections = _rebuild(job, config)
+    by_slug = {c.slug: c for c in cards}
+    card = by_slug.get(card_slug)
+    proj = projections.get(card_slug)
+    if card is None or proj is None or not proj.playable:
+        raise ValueError("Karta není k dispozici nebo není použitelná.")
+    allowed = set(config.get_path(f"lineup.slots.{slot_name}", []))
+    if not set(card.positions) & allowed:
+        raise ValueError(f"Karta nesedí do slotu {slot_name}.")
+    used = {s["card_slug"] for lu in job.lineups for s in lu["slots"]}
+    if card_slug in used:
+        raise ValueError("Karta už je v jiné sestavě.")
+
+    lineup = job.lineups[pos]
+    others = [s for s in lineup["slots"] if s["slot"] != slot_name]
+    if card.player.slug in {s.get("player_slug") for s in others}:
+        raise ValueError("Tenhle hráč už v sestavě je.")
+    spec = next(
+        (t for t in config.get("tournaments", []) if t.get("name") == lineup["tournament_name"]),
+        {},
+    )
+    rarity = str(spec.get("rarity", "")).lower()
+    if rarity and card.rarity != rarity:
+        raise ValueError(f"Turnaj bere jen raritu {rarity}.")
+    min_in = spec.get("min_in_season")
+    if min_in is not None:
+        fresh = sum(1 for s in others if by_slug.get(s["card_slug"]) and by_slug[s["card_slug"]].in_season)
+        if fresh + (1 if card.in_season else 0) < int(min_in):
+            raise ValueError(f"Sestava by neměla {min_in} karet se season bonusem.")
+
+    for s in lineup["slots"]:
+        if s["slot"] != slot_name:
+            continue
+        old = s["player"]
+        s.update({
+            "card_slug": card.slug, "player": card.player.name, "team": card.player.team_name,
+            "projected": proj.mean, "player_slug": card.player.slug, "floor": proj.floor,
+            "ceiling": proj.ceiling, "sigma": proj.sigma, "games": proj.games, "notes": list(proj.notes),
+        })
+        job.log_step(f"Ruční záměna {lineup['tournament_name']} #{lineup['index'] + 1} "
+                     f"{slot_name}: {old} → {card.player.name}")
+        break
+
+    lu_obj = _lineup_from_dict(lineup)
+    lineup["total_projected"] = round(lu_obj.total_projected, 2)
+    lineup["win_probability"] = win_probability(lu_obj, lineup.get("target_score"))
+    lineup["sigma"] = round(sum((s.sigma or 0) ** 2 for s in lu_obj.slots) ** 0.5, 2)
+
+    # Nová kontrola a nové alternativy.
+    _step_validate(job, config, time.monotonic() + 30, notify_user=False)
+    job.state = "NEEDS_REVIEW"
+    job.alternatives = build_alternatives(job.lineups, cards, projections, config)
+    save(job)
+    return job
+
+
 def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournament]:
     """Spáruje leaderboardy ze Sorare s turnaji z configu."""
     available = job.leaderboards or client.fetch_leaderboards()
@@ -476,7 +698,7 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
 
         for board in matches:
             wanted = int(spec.get("max_lineups", 1))
-            if config.get_path("submission.overwrite_existing", False):
+            if job.overwrite or config.get_path("submission.overwrite_existing", False):
                 # createOrUpdate existující sestavu přepíše, takže se nemusíme
                 # ohlížet na to, kolik jich už je.
                 remaining = wanted
@@ -497,9 +719,20 @@ def _tournaments(job: Job, config: Config, client: SorareClient) -> list[Tournam
                     max_lineups=remaining,
                     leaderboard_id=board["id"],
                     min_in_season=spec.get("min_in_season"),
+                    # Bez tohohle by rare karta skončila v limited leaderboardu
+                    # a Sorare by sestavu odmítl.
+                    allowed_rarities=[rarity] if rarity else [],
+                    target_score=_as_float(spec.get("target_score")),
                 )
             )
     return out
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _fixture_window(job: Job) -> tuple:
@@ -537,6 +770,12 @@ def _lineup_from_dict(raw: dict) -> Lineup:
                 player_name=s["player"],
                 team=s.get("team"),
                 projected=float(s.get("projected", 0)),
+                player_slug=s.get("player_slug"),
+                floor=s.get("floor"),
+                ceiling=s.get("ceiling"),
+                sigma=s.get("sigma"),
+                games=s.get("games"),
+                notes=list(s.get("notes") or []),
             )
             for s in raw["slots"]
         ],

@@ -15,9 +15,9 @@ log = logging.getLogger(__name__)
 
 # Při každé změně toho, co build_features vrací, zvýšit — jinak by se
 # 24 h používala stará uložená verze bez nových klíčů.
-FEATURES_VERSION = 5
+FEATURES_VERSION = 7
 K_FEATURES = f"sorare:features:v{FEATURES_VERSION}"
-REQUIRED_KEYS = ("vault", "rewards", "ledger", "diagnostics")
+REQUIRED_KEYS = ("vault", "power", "lineup_input", "rewards", "ledger", "diagnostics")
 LEAF_BASES = {"Int", "Float", "String", "Boolean", "ID"}
 MONEY_FIELDS = ("eurCents", "usdCents", "gbpCents", "referenceCurrency")
 REWARD_LEAVES = ("quantity", "rarity", "coinAmount", "amount", "essenceAmount", "count", "xp", "points")
@@ -40,6 +40,8 @@ def get_features(refresh: bool = False, schema: Schema | None = None) -> dict:
         reason = f"Schéma Sorare nejde stáhnout: {type(exc).__name__}: {exc}"[:400]
         features = {
             "vault": {},
+            "power": {},
+            "lineup_input": {},
             "rewards": {"available": False, "reason": reason},
             "ledger": {"available": False, "reason": reason, "candidates": [], "sources": []},
             "diagnostics": {"ok": False, "error": reason},
@@ -56,6 +58,8 @@ def build_features(s: Schema) -> dict:
     return {
         "version": FEATURES_VERSION,
         "vault": _vault(s),
+        "power": _power(s),
+        "lineup_input": _lineup_input(s),
         "rewards": _rewards(s),
         "ledger": _ledger(s),
         "diagnostics": _diagnostics(s),
@@ -154,6 +158,43 @@ def _vault(s: Schema) -> dict:
         "selection": " ".join(fragments),
         "field": found,
     }
+
+
+def _power(s: Schema) -> dict:
+    """Bonus karty (power = XP + season + kolekce), pokud ho schéma vystavuje.
+
+    Sorare ho vede jako násobitel ("1.05") nebo jako podíl (0.05). Parsování
+    a normalizace je v client._power_mult.
+    """
+    card_type = s.node_type("CurrentUser", "cards") or "AnyCardInterface"
+    rx = r"^power$|^powerBonus$|^totalBonus$|^bonus$"
+    leaves = [n for n in s.find(card_type, rx) if _is_leaf(s, s.field(card_type, n).base)]
+    if leaves:
+        leaves.sort(key=lambda n: (n != "power", len(n)))
+        return {"selection": f"cardPower: {leaves[0]}", "field": leaves[0]}
+    fragments, found = [], None
+    for concrete in s.possible_types(card_type):
+        names = [n for n in s.find(concrete, rx) if _is_leaf(s, s.field(concrete, n).base)]
+        if names:
+            names.sort(key=lambda n: (n != "power", len(n)))
+            found = found or names[0]
+            fragments.append(f"... on {concrete} {{ cardPower: {names[0]} }}")
+    return {"selection": " ".join(fragments), "field": found}
+
+
+def _lineup_input(s: Schema) -> dict:
+    """Jak mutaci říct, kterou existující sestavu přepsat.
+
+    Bez ID sestavy by přepis při druhém běhu před uzávěrkou mohl skončit
+    chybou „already has a lineup“ nebo druhou sestavou. Když pole ve
+    schématu není, přepis se vypne a první sestava zůstane.
+    """
+    name = "createOrUpdateSo5LineupInput"
+    if name not in s.types:
+        return {"id_field": None}
+    ids = [n for n in s.find(name, r"^(so5)?lineupid$|^id$")]
+    ids.sort(key=lambda n: (n.lower() != "so5lineupid", len(n)))
+    return {"id_field": ids[0] if ids else None, "fields": sorted(s.types[name].fields)}
 
 
 # ------------------------------------------------------------------ odměny

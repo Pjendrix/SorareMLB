@@ -1,7 +1,7 @@
 """Stránky aplikace. Každá se renderuje jednou při startu funkce."""
 from .sports.football import FootballAdapter
 from .web import (
-    dashboard, football_lineups, history, ledger_page, mlb_lineups, rewards_page, settings, sport,
+    calibration_page, dashboard, football_lineups, history, ledger_page, mlb_lineups, rewards_page, settings, sport,
 )
 
 PAGES = {
@@ -14,6 +14,7 @@ PAGES = {
         actions='<a class="btn" href="/mlb/sestavy">Sestavy MLB</a>',
     ),
     "/mlb/sestavy": mlb_lineups.render(),
+    "/mlb/kalibrace": calibration_page.render(),
     "/mlb/historie": history.render("mlb", "mlb-history", "MLB", show_runs=True),
     "/fotbal": sport.render(
         "football", "football", "Fotbal",

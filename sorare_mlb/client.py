@@ -96,7 +96,7 @@ class SorareClient:
                     messages = resp.text[:400]
                 raise SorareError(
                     f"Sorare odmítlo dotaz ({operation_name or 'bez názvu'}): {messages}\n"
-                    "Schéma se nejspíš změnilo — otevři /api/probe a uprav queries.py."
+                    "Schéma se nejspíš změnilo — otevři /api/schema?type=... a uprav queries.py."
                 )
 
             resp.raise_for_status()
@@ -113,16 +113,25 @@ class SorareClient:
     # ------------------------------------------------------------------ data
 
     def _with_vault(self, query: str) -> str:
-        """Doplní do dotazu na karty příznak trezoru, pokud ho schéma má."""
+        """Doplní do dotazu na karty volitelná pole, která schéma má.
+
+        Trezor (vaultFlag) a bonus karty (cardPower). Když pole ve schématu
+        není, dotaz zůstane beze změny a karta se bere bez bonusu.
+        """
         try:
             from .features import get_features
 
-            selection = (get_features().get("vault") or {}).get("selection")
-        except Exception:  # noqa: BLE001 — bez schématu jedeme bez trezoru
-            selection = None
-        if not selection:
+            feats = get_features()
+            extra = [
+                (feats.get(key) or {}).get("selection")
+                for key in ("vault", "power")
+            ]
+        except Exception:  # noqa: BLE001 — bez schématu jedeme bez nich
+            extra = []
+        extra = [e for e in extra if e]
+        if not extra:
             return query
-        return query.replace("anyPositions", f"anyPositions\n        {selection}", 1)
+        return query.replace("anyPositions", "anyPositions\n        " + "\n        ".join(extra), 1)
 
     def fetch_cards(self, use_cache: bool = True) -> list[Card]:
         """Karty i s posledními skóre — obojí přijde v jedné odpovědi."""
@@ -298,12 +307,24 @@ class SorareClient:
 
     # ------------------------------------------------------------------ mutation
 
+    def existing_lineup_ids(self) -> dict[str, list[str]]:
+        """ID mých sestav podle slugu leaderboardu (pro přepis)."""
+        body = self.execute(queries.MY_LINEUPS, operation_name="MyLineups")
+        out: dict[str, list[str]] = {}
+        for lu in ((body.get("data") or {}).get("so5") or {}).get("myOngoingAndRecentSo5Lineups") or []:
+            slug = (lu.get("so5Leaderboard") or {}).get("slug")
+            if slug and lu.get("id"):
+                out.setdefault(slug, []).append(lu["id"])
+        return out
+
     def submit_lineup(
         self,
         leaderboard_id: str,
         card_slugs: list[str],
         manager_team_id: str | None = None,
         requires_manager_team: bool = False,
+        lineup_id: str | None = None,
+        lineup_id_field: str | None = None,
     ) -> dict:
         """Odešle sestavu. Chce ID leaderboardu, ne slug.
 
@@ -321,6 +342,8 @@ class SorareClient:
         }
         # Hot Streak Champion manager team nepovoluje vůbec ("can't have more
         # than 0"), Challenger ho naopak vyžaduje pro každou sestavu zvlášť.
+        if lineup_id and lineup_id_field:
+            payload[lineup_id_field] = lineup_id
         if manager_team_id:
             payload["managerTeamId"] = manager_team_id
         elif requires_manager_team:
@@ -340,19 +363,6 @@ class SorareClient:
             messages = "; ".join(e.get("message", "?") for e in result["errors"])
             raise SorareError(f"Sorare sestavu odmítl: {messages}")
         return result
-
-    # ------------------------------------------------------------------ probe
-
-    def introspect_root(self) -> dict:
-        body = self.execute(queries.INTROSPECT_ROOT, operation_name="IntrospectRoot")
-        return (body.get("data") or {}).get("__schema") or {}
-
-    def introspect_type(self, name: str) -> dict | None:
-        body = self.execute(
-            queries.INTROSPECT_TYPE, {"name": name},
-            operation_name="IntrospectType", tolerate_errors=True,
-        )
-        return (body.get("data") or {}).get("__type")
 
 
 def _current_season() -> int:
@@ -403,7 +413,25 @@ def card_from_dict(node: dict) -> Card:
         in_season=int(node.get("seasonYear") or 0) >= _current_season(),
         sorare_projection=_as_float(raw.get("nextClassicFixtureProjectedScore")),
         in_vault=bool(node.get("vaultFlag")),
+        power=_power_mult(node.get("cardPower")),
     )
+
+
+def _power_mult(value) -> float:
+    """Bonus karty jako násobitel. "1.05" i 0.05 i "5%" -> 1.05."""
+    if value is None:
+        return 1.0
+    text = str(value).strip().rstrip("%")
+    try:
+        num = float(text)
+    except ValueError:
+        return 1.0
+    if str(value).strip().endswith("%"):
+        num = 1 + num / 100
+    elif num < 0.5:          # podíl (0.05)
+        num = 1 + num
+    # Rozumný rozsah; cokoliv jiného je chyba výkladu, ne bonus.
+    return num if 0.9 <= num <= 2.0 else 1.0
 
 
 def _as_float(value) -> float | None:

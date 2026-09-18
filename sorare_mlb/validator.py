@@ -59,7 +59,7 @@ class LineupValidator:
                 card = self.cards.get(slot.card_slug)
                 if card is None:
                     continue
-                player = self.name_index.get(mlb.normalize_name(card.player.name))
+                player = mlb.match_player(self.name_index, card.player.slug, card.player.name)
 
                 if player is None:
                     issues.append(
@@ -89,7 +89,7 @@ class LineupValidator:
                 if game is None:
                     issues.append(
                         Issue(lineup.tournament_name, slot.slot, slot.player_name, "blocker",
-                              "tým dnes nehraje",
+                              "tým v tomto gameweeku nehraje",
                               self._suggest(card, slot.slot, used))
                     )
                     continue

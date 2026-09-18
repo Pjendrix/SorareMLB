@@ -45,6 +45,10 @@ class Store:
         """Nejnovější položky seznamu (už rozparsované z JSON)."""
         raise NotImplementedError
 
+    def acquire(self, key: str, ttl_seconds: int) -> bool:
+        """Zámek: nastaví klíč jen když neexistuje. True = zámek je náš."""
+        raise NotImplementedError
+
     # --- pohodlné obaly ---
 
     def get_json(self, key: str, default: Any = None) -> Any:
@@ -86,6 +90,9 @@ class UpstashStore(Store):
 
     def delete(self, key: str) -> None:
         self._cmd("DEL", key)
+
+    def acquire(self, key: str, ttl_seconds: int) -> bool:
+        return self._cmd("SET", key, "1", "NX", "EX", str(int(ttl_seconds))) == "OK"
 
     def push_capped(self, key: str, value: Any, limit: int) -> None:
         payload = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
@@ -148,6 +155,16 @@ class LocalStore(Store):
             data = self._read()
             data.pop(key, None)
             self._write(data)
+
+    def acquire(self, key: str, ttl_seconds: int) -> bool:
+        with self._lock:
+            data = self._read()
+            entry = data.get(key)
+            if entry and not (entry.get("expires_at") and time.time() > entry["expires_at"]):
+                return False
+            data[key] = {"value": "1", "expires_at": time.time() + ttl_seconds}
+            self._write(data)
+            return True
 
     def push_capped(self, key: str, value: Any, limit: int) -> None:
         with self._lock:
@@ -223,5 +240,9 @@ K_OVERVIEW = "overview:{sport}"
 K_UPCOMING = "sorare:upcoming"
 K_RECENT_LINEUPS = "sorare:recent-lineups"
 K_HIST_JOBS = "history:jobs"
+K_JOB_LOCK = "job:{job_id}:lock"
+K_TICK_DONE = "tick:{fixture}:{phase}"
+K_TICK_REMINDER = "tick:reminder:{day}"
+K_CALIBRATION = "calibration:lineups"
 K_HIST_SNAPSHOTS = "history:snapshots:{sport}"
 K_HIST_SNAPSHOT_DAY = "history:snapshot-day:{sport}"

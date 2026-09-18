@@ -73,6 +73,9 @@ class Card:
     sorare_probable_starter: bool | None = None
     # Karta uložená v trezoru (vault) — do sestav ani přehledu formy nepatří.
     in_vault: bool = False
+    # Násobitel bonusu karty (power: XP, season, kolekce). 1.0 = bez bonusu
+    # nebo schéma pole nevystavuje.
+    power: float = 1.0
 
     @property
     def positions(self) -> list[str]:
@@ -123,6 +126,9 @@ class Tournament:
     # Kolik karet se season bonusem sestava potřebuje.
     # None = bez omezení (Challenger), 6 = in-season soutěže.
     min_in_season: int | None = None
+    # Cílové skóre (práh streaku). Když je vyplněné, UI ukazuje šanci ho
+    # překonat a optimalizátor penalizuje rozptyl sestavy.
+    target_score: float | None = None
 
 
 @dataclass
@@ -136,6 +142,10 @@ class Projection:
     notes: list[str] = field(default_factory=list)
     playable: bool = True
     reason_unplayable: str | None = None
+    # Kolik zápasů (u SP startů) hráč v gameweeku odehraje podle rozpisu.
+    games: float = 1.0
+    # Směrodatná odchylka projekce celého gameweeku (po shrinkage).
+    sigma: float = 0.0
 
 
 @dataclass
@@ -145,6 +155,12 @@ class LineupSlot:
     player_name: str
     team: str | None
     projected: float
+    player_slug: str | None = None
+    floor: float | None = None
+    ceiling: float | None = None
+    sigma: float | None = None
+    games: float | None = None
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -175,6 +191,12 @@ class Lineup:
                     "player": s.player_name,
                     "team": s.team,
                     "projected": round(s.projected, 2),
+                    "player_slug": s.player_slug,
+                    "floor": s.floor,
+                    "ceiling": s.ceiling,
+                    "sigma": s.sigma,
+                    "games": s.games,
+                    "notes": s.notes,
                 }
                 for s in self.slots
             ],

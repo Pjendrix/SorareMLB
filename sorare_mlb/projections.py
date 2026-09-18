@@ -70,12 +70,14 @@ class ProjectionEngine:
             return self._unplayable(card, "tým v tomto gameweeku nehraje")
 
         if self._is_hitter(card):
-            return self._project_hitter(card, scores, mlb_player, team_games[0])
+            return self._project_hitter(card, scores, mlb_player, team_games)
         return self._project_pitcher(card, scores, mlb_player, team_games)
 
     # ------------------------------------------------------------------ hitters
 
-    def _project_hitter(self, card: Card, scores: list[float], player: dict, game: dict) -> Projection:
+    def _project_hitter(
+        self, card: Card, scores: list[float], player: dict, team_games: list[dict]
+    ) -> Projection:
         from . import mlb
 
         weights = self.config.get_path("projection.hitter", {})
@@ -84,31 +86,39 @@ class ProjectionEngine:
 
         base = self._form_base(scores, weights, comp, notes)
 
-        # Matchup: soupeřův probable pitcher. Horší ERA soupeře = lepší pro pálkaře.
-        opp_side = "away" if game["side"] == "home" else "home"
-        opp_pitcher_id = game[opp_side].get("probable_pitcher_id")
-        matchup_mult = 1.0
-        if opp_pitcher_id:
-            stats = mlb.pitcher_stats(opp_pitcher_id, self.season)
-            era = stats.get("era")
-            if era:
-                # ERA 4.00 je neutrál; každý bod ERA hýbe projekcí o ~6 %.
-                matchup_mult = 1.0 + (era - 4.00) * 0.06
-                matchup_mult = max(0.80, min(1.20, matchup_mult))
-                notes.append(f"soupeř SP ERA {era:.2f}")
-        else:
-            notes.append("soupeřův SP zatím neohlášen")
+        # Matchup a park se průměrují přes všechny zápasy gameweeku, ne jen
+        # přes první. Horší ERA soupeřova SP = lepší pro pálkaře.
+        matchups, parks, eras = [], [], []
+        for game in team_games:
+            opp_side = "away" if game["side"] == "home" else "home"
+            opp_pitcher_id = game[opp_side].get("probable_pitcher_id")
+            mult = 1.0
+            if opp_pitcher_id:
+                era = mlb.pitcher_stats(opp_pitcher_id, self.season).get("era")
+                if era:
+                    # ERA 4.00 je neutrál; každý bod ERA hýbe projekcí o ~6 %.
+                    mult = max(0.80, min(1.20, 1.0 + (era - 4.00) * 0.06))
+                    eras.append(era)
+            matchups.append(mult)
+            parks.append(1.0 + (mlb.park_factor(game.get("venue")) - 1.0) * 0.7)
 
-        park_mult = 1.0 + (mlb.park_factor(game.get("venue")) - 1.0) * 0.7
+        matchup_mult = sum(matchups) / len(matchups)
+        park_mult = sum(parks) / len(parks)
+        if eras:
+            notes.append(f"soupeřovi SP: ERA Ø {sum(eras) / len(eras):.2f} ({len(eras)}/{len(team_games)} ohlášeno)")
+        else:
+            notes.append("soupeřovi SP zatím neohlášeni")
 
         w_matchup = float(weights.get("matchup", 0.0))
         w_park = float(weights.get("ballpark", 0.0))
-        mean = base * (1 + w_matchup * (matchup_mult - 1) + w_park * (park_mult - 1))
+        per_game = base * (1 + w_matchup * (matchup_mult - 1) + w_park * (park_mult - 1))
 
         comp["matchup_mult"] = round(matchup_mult, 3)
         comp["park_mult"] = round(park_mult, 3)
 
-        return self._finalize(card, mean, scores, comp, notes)
+        games = float(len(team_games))
+        notes.append(f"{len(team_games)} zápasů v GW")
+        return self._finalize(card, per_game, games, scores, comp, notes, "hitter")
 
     # ------------------------------------------------------------------ pitchers
 
@@ -129,18 +139,22 @@ class ProjectionEngine:
             #   1. Sorare probablePitchers (to je odznak "PP" na kartě),
             #   2. MLB StatsAPI probable pitcher (chodí až den dva předem).
             mlb_announced = 0
+            start_count = 0
             for candidate in team_games:
                 probable = candidate[candidate["side"]].get("probable_pitcher_id")
                 if probable:
                     mlb_announced += 1
                 if probable == player["id"]:
-                    game = candidate
-                    break
+                    start_count += 1
+                    game = game or candidate
 
             starts = None
             if game is not None:
                 starts = True
-                notes.append("ohlášený start (MLB)")
+                notes.append(
+                    "ohlášený start (MLB)" if start_count == 1
+                    else f"ohlášené {start_count} starty (MLB)"
+                )
             elif card.sorare_probable_starter is True:
                 starts = True
                 notes.append("ohlášený start (Sorare PP)")
@@ -170,6 +184,17 @@ class ProjectionEngine:
         base = self._form_base(scores, weights, comp, notes)
         base *= comp.get("no_start_mult", 1.0)
 
+        # Kolik vystoupení čekáme. SP: počet ohlášených startů (aspoň 1,
+        # když startuje). RP: zápasy týmu × pravděpodobnost nasazení.
+        if is_sp:
+            games = float(max(start_count, 1)) if starts else 1.0
+            role = "starting_pitcher"
+        else:
+            rate = float(self.config.get_path("projection.rp_appearance_rate", 0.45))
+            games = max(1.0, len(team_games) * rate)
+            role = "relief_pitcher"
+            notes.append(f"{len(team_games)} zápasů týmu, čekaná vystoupení {games:.1f}")
+
         stats = mlb.pitcher_stats(player["id"], self.season)
         k_rate = stats.get("k_rate")
         k_mult = 1.0
@@ -190,7 +215,7 @@ class ProjectionEngine:
 
         home_mult = 1.03 if game["side"] == "home" else 0.98
 
-        mean = base * (
+        per_game = base * (
             1
             + float(weights.get("k_rate", 0)) * (k_mult - 1)
             + float(weights.get("opp_offense", 0)) * (opp_mult - 1)
@@ -199,7 +224,9 @@ class ProjectionEngine:
         comp.update(
             {"k_mult": round(k_mult, 3), "opp_mult": round(opp_mult, 3), "home_mult": home_mult}
         )
-        return self._finalize(card, mean, scores, comp, notes)
+        # Bez ohlášeného startu nevěříme ani Sorare projekci — ta by penalizaci přebila.
+        blend = comp.get("no_start_mult") is None
+        return self._finalize(card, per_game, games, scores, comp, notes, role, blend)
 
     # ------------------------------------------------------------------ helpers
 
@@ -228,16 +255,68 @@ class ProjectionEngine:
         return base
 
     def _finalize(
-        self, card: Card, mean: float, scores: list[float], comp: dict, notes: list[str]
+        self,
+        card: Card,
+        per_game: float,
+        games: float,
+        scores: list[float],
+        comp: dict,
+        notes: list[str],
+        role: str,
+        blend_sorare: bool = True,
     ) -> Projection:
-        spread = statistics.pstdev(scores[:15]) if len(scores) >= 3 else mean * 0.45
+        """Z projekce na zápas udělá projekci gameweeku, floor a ceiling.
+
+        * Součet přes zápasy: `projection.sum_over_games` (Sorare MLB sčítá
+          body ze všech zápasů gameweeku; když ne, nastav false).
+        * Rozptyl: vlastní σ z L15 se stahuje k typické σ pozice (shrinkage),
+          protože 15 hodnot je na odhad rozptylu málo.
+        * Sorare projekce (`nextClassicFixtureProjectedScore`) se přimíchá
+          váhou `projection.sorare_weight`.
+        * Bonus karty (power) násobí všechno.
+        """
+        cfg = self.config
+        sum_games = bool(cfg.get_path("projection.sum_over_games", True))
+        mult_games = games if sum_games else 1.0
+
+        prior = float(cfg.get_path(f"projection.sigma_prior.{role}", {
+            "hitter": 9.0, "starting_pitcher": 14.0, "relief_pitcher": 7.0,
+        }[role]))
+        window = scores[:15]
+        n = len(window)
+        own = statistics.pstdev(window) if n >= 3 else prior
+        w = n / (n + 10)
+        sigma_game = w * own + (1 - w) * prior
+
+        mean = per_game * mult_games
+        # Rozptyl součtu nezávislých zápasů roste s odmocninou počtu.
+        sigma = sigma_game * (mult_games ** 0.5)
+
+        sorare = card.sorare_projection
+        weight = float(cfg.get_path("projection.sorare_weight", 0.35))
+        if blend_sorare and sorare and sorare > 0 and weight > 0:
+            comp["own_mean"] = round(mean, 2)
+            comp["sorare_proj"] = round(sorare, 2)
+            mean = (1 - weight) * mean + weight * sorare
+            notes.append(f"Sorare projekce {sorare:.1f}")
+
+        if card.power and card.power != 1.0:
+            mean *= card.power
+            sigma *= card.power
+            comp["power"] = round(card.power, 3)
+            notes.append(f"bonus karty +{(card.power - 1) * 100:.0f} %")
+
+        comp["games"] = round(games, 2)
+        comp["sigma"] = round(sigma, 2)
         return Projection(
             card_slug=card.slug,
             mean=round(mean, 2),
-            floor=round(max(0.0, mean - 0.85 * spread), 2),
-            ceiling=round(mean + 1.1 * spread, 2),
+            floor=round(max(0.0, mean - 0.85 * sigma), 2),
+            ceiling=round(mean + 1.1 * sigma, 2),
             components=comp,
             notes=notes,
+            games=round(games, 2),
+            sigma=round(sigma, 2),
         )
 
     @staticmethod
@@ -258,12 +337,7 @@ class ProjectionEngine:
     def _match_player(self, card: Card) -> dict | None:
         from . import mlb
 
-        manual = mlb.manual_player_map.get(card.player.slug)
-        if manual:
-            for entry in self.name_index.values():
-                if entry["id"] == manual:
-                    return entry
-        return self.name_index.get(mlb.normalize_name(card.player.name))
+        return mlb.match_player(self.name_index, card.player.slug, card.player.name)
 
     @staticmethod
     def _unplayable(card: Card, reason: str) -> Projection:
@@ -274,4 +348,5 @@ class ProjectionEngine:
             ceiling=0.0,
             playable=False,
             reason_unplayable=reason,
+            games=0.0,
         )
