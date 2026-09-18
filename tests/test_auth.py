@@ -102,7 +102,7 @@ def test_otp_accepts_spaced_input(sorare, store):
 
 
 def test_expired_challenge_gives_clear_error(sorare, store):
-    with pytest.raises(auth.AuthError, match="Začni přihlášení znovu"):
+    with pytest.raises(auth.AuthError, match="Začít přihlášení"):
         auth.complete_login(GOOD_CODE)
 
 

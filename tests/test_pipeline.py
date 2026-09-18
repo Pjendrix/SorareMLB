@@ -35,53 +35,86 @@ def store(monkeypatch, tmp_path):
     return fake
 
 
+FRESH = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+STALE = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
+
+
+def card_node(slug, pos, tag, i, pi, last_game=None, rarity="limited"):
+    """Uzel karty ve tvaru, v jakém ho vrací dotaz USER_CARDS."""
+    day = last_game or FRESH
+    return {
+        "slug": slug, "rarityTyped": rarity, "seasonYear": datetime.now().year,
+        "anyPositions": [f"BASEBALL_{pos.upper()}"],
+        "anyTeam": {"slug": f"team{(i + pi) % 6}", "name": f"Team {(i + pi) % 6}"},
+        "anyPlayer": {
+            # Pozor: normalize_name zahazuje číslice, takže jména musí být
+            # rozlišitelná písmeny, ne indexy.
+            "slug": f"p-{slug}", "displayName": f"Player {tag}{chr(97 + i)}",
+            "playerGameScores": [
+                {"score": sc, "anyGame": {"date": day}}
+                for sc in (45.0, 50.0, 40.0, 55.0, 38.0, 47.0)
+            ],
+        },
+    }
+
+
+def boards():
+    cutoff = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    fixture = {"slug": "fixture-1", "gameWeek": 1, "sport": "BASEBALL",
+               "startDate": "2026-09-14T00:00:00Z", "endDate": "2026-09-17T00:00:00Z"}
+    later = {**fixture, "slug": "fixture-2", "gameWeek": 2}
+    late_cut = (datetime.now(timezone.utc) + timedelta(days=4)).isoformat()
+    return [
+        {"id": "hs-id", "slug": "mlb-champion_pve-limited", "rarityType": "limited",
+         "cutOffDate": cutoff, "mySo5LineupsCount": 0, "requiresManagerTeam": False,
+         "myManagerTeams": [], "so5Fixture": fixture},
+        {"id": "ch-id", "slug": "mlb-challenger-limited", "rarityType": "limited",
+         "cutOffDate": cutoff, "mySo5LineupsCount": 0, "requiresManagerTeam": True,
+         "myManagerTeams": [], "so5Fixture": fixture},
+        # Příští gameweek — nesmí se smíchat s tím aktuálním.
+        {"id": "hs2-id", "slug": "mlb-champion_pve-limited-2", "rarityType": "limited",
+         "cutOffDate": late_cut, "mySo5LineupsCount": 0, "so5Fixture": later},
+    ]
+
+
 @pytest.fixture
 def fake_world(monkeypatch, store):
-    cards, players = [], []
+    cards = []
     for pi, (pos, tag) in enumerate(POSITIONS):
         for i in range(6):  # 4 sestavy × 7 slotů = 28 míst, pool musí být větší
-            slug = f"{tag}{i}"
-            cards.append({
-                "slug": slug, "rarity": "limited", "seasonYear": 2026,
-                "player": {
-                    # Pozor: normalize_name zahazuje číslice, takže jména
-                    # musí být rozlišitelná písmeny, ne indexy.
-                    "slug": f"p-{slug}", "displayName": f"Player {tag}{chr(97 + i)}",
-                    "positions": [pos],
-                    "team": {"slug": f"team{(i + pi) % 6}", "abbreviation": f"T{(i+pi)%6}"},
-                },
-            })
-            players.append(f"p-{slug}")
-    store.set(K_CARDS, cards)
+            cards.append(card_node(f"{tag}{i}", pos, tag, i, pi))
+    submitted = []
 
-    # --- fake Sorare client ---
+    from sorare_mlb.client import SorareClient as Real
+
     class FakeClient:
+        nodes = cards
+
         def __init__(self, config, token=None):
             pass
 
-        def fetch_open_fixture(self):
-            return {"slug": "fixture-1", "displayName": "GW 1", "state": "opened"}
+        def fetch_leaderboards(self, sport="BASEBALL"):
+            return boards()
 
         def fetch_cards(self, use_cache=True):
             from sorare_mlb.client import card_from_dict
-            return [card_from_dict(c) for c in cards]
+            store.set(K_CARDS, self.nodes)
+            return [card_from_dict(c) for c in self.nodes]
 
-        def fetch_scores_batch(self, slugs):
-            recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-            return {
-                s: {"scores": [45.0, 50.0, 40.0, 55.0, 38.0, 47.0], "last_game": recent}
-                for s in slugs
-            }
+        fetch_scores = Real.fetch_scores
 
-        def fetch_competitions(self, fixture_slug):
-            return [
-                {"slug": "mlb-hot-streak-limited", "lineupsCount": 0, "maxLineups": 1},
-                {"slug": "mlb-challenger-limited", "lineupsCount": 0, "maxLineups": 3},
-            ]
+        def fetch_probable_starters(self, fixture_slug):
+            assert fixture_slug == "fixture-1"
+            return set(), "test: nikdo neohlášen"
 
-        def submit_lineup(self, competition_slug, card_slugs):
+        def existing_lineup_ids(self):
+            return {}
+
+        def submit_lineup(self, board_id, card_slugs, **kwargs):
+            assert board_id in ("hs-id", "ch-id"), "odesláno do špatného gameweeku"
             assert len(card_slugs) == 7
-            return {"lineup": {"id": f"lineup-{competition_slug}"}}
+            submitted.append(board_id)
+            return {"so5Lineup": {"id": f"lineup-{board_id}-{len(submitted)}"}}
 
     monkeypatch.setattr(runner, "SorareClient", FakeClient)
 
@@ -115,6 +148,7 @@ def fake_world(monkeypatch, store):
 
     sent = []
     monkeypatch.setattr(runner.notify, "notify", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(runner, "_self_invoke", lambda job_id: None)
     return sent
 
 
@@ -172,26 +206,14 @@ def test_no_lineup_is_submitted_twice(fake_world, config, store):
 
 
 def test_inactive_players_are_excluded(fake_world, config, store, monkeypatch):
-    """Hráč bez zápasu déle než limit se do sestavy nedostane.
-
-    Nahrazuje to kontrolu oficiálních MLB lineupů, která je nespolehlivá —
-    ty se zveřejňují pozdě a u ranních běhů vůbec.
-    """
-    stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-
-    original = runner.SorareClient
-
-    class StaleClient(original):
-        def fetch_scores_batch(self, slugs):
-            out = {}
-            for s in slugs:
-                # Každý druhý hráč dlouho nenastoupil.
-                last = stale if s.endswith(("a", "b")) else fresh
-                out[s] = {"scores": [45.0] * 6, "last_game": last}
-            return out
-
-    monkeypatch.setattr(runner, "SorareClient", StaleClient)
+    """Hráč bez zápasu déle než limit se do sestavy nedostane."""
+    stale_cards = []
+    for pi, (pos, tag) in enumerate(POSITIONS):
+        for i in range(6):
+            # Hráči „a“ a „b“ měsíc nenastoupili.
+            stale_cards.append(card_node(f"{tag}{i}", pos, tag, i, pi,
+                                         last_game=STALE if i < 2 else FRESH))
+    monkeypatch.setattr(runner.SorareClient, "nodes", stale_cards)
 
     job = runner.create_job(mode="propose")
     job = runner.advance(job, config)
@@ -199,6 +221,49 @@ def test_inactive_players_are_excluded(fake_world, config, store, monkeypatch):
     assert job.state == "NEEDS_REVIEW", f"{job.state}: {job.error}"
     picked = {s["card_slug"] for lu in job.lineups for s in lu["slots"]}
     assert picked, "nevybrala se žádná karta"
-    assert not any(slug.endswith(("a", "b")) for slug in picked), (
+    assert not any(slug.endswith(("0", "1")) for slug in picked), (
         "vybrán hráč, který měsíc nenastoupil"
     )
+
+
+def test_only_nearest_fixture_is_used(fake_world, config, store):
+    job = runner.create_job(mode="propose")
+    job = runner.advance(job, config)
+    assert job.fixture["slug"] == "fixture-1"
+    assert {b["slug"] for b in job.leaderboards} == {
+        "mlb-champion_pve-limited", "mlb-challenger-limited",
+    }
+
+
+def test_rare_cards_stay_out_of_limited(fake_world, config, store, monkeypatch):
+    nodes = list(runner.SorareClient.nodes)
+    # Nejlepší SP je rare — do limited turnaje nesmí.
+    rare = card_node("rare-sp", "starting_pitcher", "rsp", 0, 0, rarity="rare")
+    rare["anyPlayer"]["playerGameScores"] = [
+        {"score": 99.0, "anyGame": {"date": FRESH}} for _ in range(6)
+    ]
+    rare["anyPlayer"]["displayName"] = "Player sp" + "a"  # existuje v MLB indexu
+    rare["anyPlayer"]["slug"] = "p-rare"
+    monkeypatch.setattr(runner.SorareClient, "nodes", nodes + [rare])
+    job = runner.advance(runner.create_job(mode="propose"), config)
+    picked = {s["card_slug"] for lu in job.lineups for s in lu["slots"]}
+    assert "rare-sp" not in picked
+
+
+def test_lock_prevents_parallel_advance(fake_world, config, store):
+    from sorare_mlb.store import K_JOB_LOCK
+
+    job = runner.create_job(mode="propose")
+    assert store.acquire(K_JOB_LOCK.format(job_id=job.id), 60)
+    after = runner.advance(job, config)
+    assert after.state == "QUEUED", "job se posunul i přes cizí zámek"
+
+
+def test_swap_card_revalidates(fake_world, config, store):
+    job = runner.advance(runner.create_job(mode="propose"), config)
+    key, alts = next((k, v) for k, v in job.alternatives.items() if v)
+    pos, slot = key.split(":")
+    target = alts[0]["card_slug"]
+    job = runner.swap_card(job, config, int(pos), slot, target)
+    assert any(s["card_slug"] == target for s in job.lineups[int(pos)]["slots"])
+    assert job.state == "NEEDS_REVIEW"

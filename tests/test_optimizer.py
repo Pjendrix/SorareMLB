@@ -122,11 +122,44 @@ def test_unplayable_cards_excluded():
     assert sp.card_slug == "sp2"
 
 
-def test_raises_when_pool_too_small():
+def test_small_pool_drops_low_priority_lineups():
+    """Na všechno karty nestačí → Challenger se ubere, Hot Streaks zůstane."""
     cards, projections = build_pool(n_per_position=1)
     opt = LineupOptimizer(CONFIG, cards, projections)
+    lineups = opt.solve([tournament("Hot Streaks", 3.0), tournament("Challenger", 1.0, max_lineups=3)])
+    assert [lu.tournament_name for lu in lineups] == ["Hot Streaks"]
+    assert len(opt.skipped) == 3
+
+
+def test_raises_when_no_lineup_possible():
+    cards, projections = build_pool(n_per_position=1)
+    cards = [c for c in cards if "starting_pitcher" not in c.positions]
+    opt = LineupOptimizer(CONFIG, cards, projections)
     with pytest.raises(OptimizationError):
-        opt.solve([tournament("Hot Streaks", 3.0), tournament("Challenger", 1.0, max_lineups=3)])
+        opt.solve([tournament("Hot Streaks", 3.0)])
+
+
+def test_rarity_filter():
+    cards, projections = build_pool()
+    for c in cards:
+        if c.slug == "sp0":
+            c.rarity = "rare"
+    t = tournament("Hot Streaks", 3.0)
+    t.allowed_rarities = ["limited"]
+    lineups = LineupOptimizer(CONFIG, cards, projections).solve([t])
+    assert "sp0" not in lineups[0].card_slugs
+
+
+def test_win_probability_monotonic():
+    from sorare_mlb.optimizer import win_probability
+
+    cards, projections = build_pool()
+    lu = LineupOptimizer(CONFIG, cards, projections).solve([tournament("Hot Streaks", 3.0)])[0]
+    for s in lu.slots:
+        s.sigma = 8.0
+    total = lu.total_projected
+    assert win_probability(lu, total - 50) > win_probability(lu, total) > win_probability(lu, total + 50)
+    assert abs(win_probability(lu, total) - 0.5) < 0.01
 
 
 def test_floor_constraint_blocks_risky_cards():
