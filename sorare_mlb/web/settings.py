@@ -88,6 +88,8 @@ const yes = (v) => `<span class="state ${v ? "on" : ""}">${v ? "Nastaveno" : "Ch
     const f = await api("/api/schema-features");
     const el = $("#schema"); el.classList.remove("skeleton");
     el.innerHTML = `<table><tbody>
+      <tr><td>Bonus karty (power)</td><td>${f.power_field ? `<span class="state on"><code>${esc(f.power_field)}</code></span>` : `<span class="state">Nenalezen — projekce bez bonusu</span>`}</td></tr>
+      <tr><td>ID sestavy v mutaci</td><td>${f.lineup_id_field ? `<span class="state on"><code>${esc(f.lineup_id_field)}</code></span>` : `<span class="state">Nenalezeno — přestavění před uzávěrkou nepřepíše odeslané</span>`}</td></tr>
       <tr><td>Příznak trezoru</td><td>${f.vault_field ? `<span class="state on"><code>${esc(f.vault_field)}</code></span>` : `<span class="state">Nenalezen</span>`}</td></tr>
       <tr><td>Výhry (rewardedRankings)</td><td>${f.rewards_available ? `<span class="state on">Dostupné</span>` : `<span class="state stop">${esc(f.rewards_reason)}</span>`}</td></tr>
       <tr><td>Historie plateb</td><td>${f.ledger_available ? `<span class="state on">${f.ledger_sources.map(esc).join(", ")}</span>` : `<span class="state stop">${esc(f.ledger_reason)}</span>`}</td></tr>

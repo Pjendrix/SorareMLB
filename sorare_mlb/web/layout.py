@@ -15,6 +15,7 @@ NAV = [
     ("ledger", "/bilance", "Bilance"),
     ("mlb", "/mlb", "MLB"),
     ("mlb-lineups", "/mlb/sestavy", "Sestavy MLB"),
+    ("mlb-calibration", "/mlb/kalibrace", "Kalibrace"),
     ("mlb-history", "/mlb/historie", "Historie MLB"),
     ("football", "/fotbal", "Fotbal"),
     ("football-lineups", "/fotbal/sestavy", "Sestavy fotbal"),
