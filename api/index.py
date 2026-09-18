@@ -13,7 +13,11 @@ Endpointy:
     POST /api/continue    interní — navázání dalšího kroku (chráněno secretem)
     GET  /api/status      stav posledního / konkrétního jobu
     POST /api/submit      ručně odešle sestavy z jobu ve stavu NEEDS_REVIEW
-    GET  /api/cron        volá cron (Vercel i GitHub Actions), chráněno secretem
+    GET  /api/cron        záložní cron (Vercel), chráněno secretem
+    GET  /api/tick        spouštěč podle uzávěrky (GitHub Actions), chráněno secretem
+    GET  /api/tick/plan   kdy automat poběží (pro UI)
+    POST /api/swap        ruční záměna karty v navržené sestavě
+    GET  /api/calibration projekce vs. skutečnost, POST = vyhodnotit skončené GW
     GET  /api/health      diagnostika konfigurace
 """
 from __future__ import annotations
@@ -60,9 +64,9 @@ async def normalize_vercel_path(request: Request, call_next):
 
 # Zvyšuje se při každé změně API — podle toho se pozná, jestli Vercel
 # opravdu nasadil nové soubory.
-APP_VERSION = "2026.09.17-diag"
+APP_VERSION = "2026.09.18-review"
 
-PUBLIC_PATHS = ("/api/cron", "/api/continue")
+PUBLIC_PATHS = ("/api/cron", "/api/continue", "/api/tick")
 
 
 @app.middleware("http")
@@ -78,6 +82,13 @@ async def password_gate(request: Request, call_next):
 
     import base64
     import secrets as _secrets
+
+    # Automatizace (GitHub Actions) se prokazuje secretem místo hesla —
+    # např. /api/status po spuštění jobu.
+    internal = os.environ.get("INTERNAL_SECRET")
+    given_secret = request.headers.get("x-internal-secret")
+    if internal and given_secret and _secrets.compare_digest(given_secret, internal):
+        return await call_next(request)
 
     header = request.headers.get("authorization", "")
     if header.lower().startswith("basic "):
@@ -113,15 +124,21 @@ def _check_secret(provided: str | None, request: Request) -> None:
     Vercel cron posílá Authorization: Bearer <CRON_SECRET>, GitHub Actions
     posílá vlastní hlavičku. Přijímáme obojí.
     """
-    expected = os.environ.get("INTERNAL_SECRET") or os.environ.get("CRON_SECRET")
+    import secrets as _secrets
+
+    expected = [v for v in (os.environ.get("INTERNAL_SECRET"), os.environ.get("CRON_SECRET")) if v]
     if not expected:
         raise HTTPException(500, "INTERNAL_SECRET není nastaven — endpoint je zakázaný.")
 
     auth = request.headers.get("authorization", "")
     bearer = auth[7:] if auth.lower().startswith("bearer ") else None
 
-    if provided != expected and bearer != expected:
-        raise HTTPException(401, "Neplatný secret.")
+    # Vercel cron posílá CRON_SECRET, GitHub Actions INTERNAL_SECRET —
+    # když jsou nastavené oba, musí projít oba.
+    for candidate in (provided, bearer):
+        if candidate and any(_secrets.compare_digest(candidate, e) for e in expected):
+            return
+    raise HTTPException(401, "Neplatný secret.")
 
 
 # --------------------------------------------------------------------- UI
@@ -428,6 +445,8 @@ def api_schema_features(refresh: bool = False) -> JSONResponse:
         {
             "app_version": APP_VERSION,
             "vault_field": (feats.get("vault") or {}).get("field"),
+            "power_field": (feats.get("power") or {}).get("field"),
+            "lineup_id_field": (feats.get("lineup_input") or {}).get("id_field"),
             "rewards_available": rewards_info.get("available", False),
             "rewards_reason": rewards_info.get("reason"),
             "rewards_query": rewards_info.get("query"),
@@ -572,6 +591,11 @@ def status(job_id: str | None = None) -> JSONResponse:
             "issues": job.issues,
             "submitted": job.submitted,
             "progress_remaining": len(job.pending_player_slugs),
+            "events": job.events[-80:],
+            "alternatives": job.alternatives,
+            "fixture": job.fixture,
+            "trigger": job.trigger,
+            "overwrite": job.overwrite,
         }
     )
 
@@ -602,129 +626,99 @@ def submit(payload: dict | None, background: BackgroundTasks) -> JSONResponse:
     return JSONResponse({"job_id": job.id, "state": job.state})
 
 
+@app.post("/api/swap")
+def swap(payload: dict) -> JSONResponse:
+    job = runner.load(payload.get("job_id", "")) or runner.latest_job()
+    if job is None:
+        raise HTTPException(404, "Job nenalezen.")
+    try:
+        runner.swap_card(
+            job, _config(), int(payload.get("lineup", -1)),
+            str(payload.get("slot", "")), str(payload.get("card_slug", "")),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return JSONResponse({"job_id": job.id, "state": job.state})
+
+
+@app.api_route("/api/tick", methods=["GET", "POST"])
+def tick(
+    request: Request,
+    x_internal_secret: str | None = Header(default=None),
+) -> JSONResponse:
+    """Spouštěč řízený skutečnou uzávěrkou (volá ho GitHub Actions často)."""
+    _check_secret(x_internal_secret, request)
+    from sorare_mlb import scheduler
+    from sorare_mlb.client import SorareClient
+
+    status_ = token_status()
+    client = SorareClient(_config()) if status_["authenticated"] else None
+    result = scheduler.tick(_config(), client, status_)
+    return JSONResponse(result)
+
+
+@app.get("/api/tick/plan")
+def tick_plan() -> JSONResponse:
+    """Kdy automat poběží — pro stránku sestav."""
+    from sorare_mlb import scheduler
+    from sorare_mlb.client import SorareClient
+
+    def run():
+        client = SorareClient(_config())
+        boards = [
+            b for b in client.fetch_all_upcoming(cache_seconds=300)
+            if str(((b.get("so5Fixture") or {}).get("sport") or "")).upper() == "BASEBALL"
+        ]
+        plan = scheduler.plan(_config(), boards)
+        plan["cron_mode"] = os.environ.get("CRON_MODE", "auto")
+        return plan
+
+    return JSONResponse(_sorare_call(run))
+
+
+@app.get("/api/calibration")
+def api_calibration() -> JSONResponse:
+    from sorare_mlb import calibration
+
+    return JSONResponse(calibration.summary())
+
+
+@app.post("/api/calibration")
+def api_calibration_evaluate() -> JSONResponse:
+    from sorare_mlb import calibration
+    from sorare_mlb.client import SorareClient
+
+    config = _config()
+    done = _sorare_call(lambda: calibration.evaluate(config, SorareClient(config)))
+    return JSONResponse({"evaluated": done, **calibration.summary()})
+
+
 @app.get("/api/cron")
 def cron(
     request: Request,
     x_internal_secret: str | None = Header(default=None),
-    background: BackgroundTasks = None,
 ) -> JSONResponse:
-    _check_secret(x_internal_secret, request)
+    """Denní záloha (Vercel cron): vyhodnotí kalibraci a udělá jeden tik.
 
-    # Pokud předchozí job ještě běží, nespouštíme druhý — jen ho postrčíme dál.
-    previous = runner.latest_job()
-    if previous and previous.state not in ("DONE", "FAILED", "NEEDS_REVIEW"):
-        background.add_task(runner.advance, previous, _config())
-        return JSONResponse({"job_id": previous.id, "state": previous.state, "resumed": True})
-
-    status_ = token_status()
-    if not status_["authenticated"]:
-        # Cron nesmí tiše selhat — dej vědět, ať se stihne přihlásit.
-        from sorare_mlb import notify
-
-        notify.notify(
-            "🔑 **Sorare token vypršel.** Přihlas se na /login, jinak se sestavy neodešlou."
-        )
-        raise HTTPException(401, "Chybí platný token, přihlas se na /login.")
-
-    if status_["needs_login"]:
-        from sorare_mlb import notify
-
-        notify.notify(
-            f"🔑 Sorare token platí ještě {status_['days_left']} dní — obnov ho na /login."
-        )
-
-    mode = os.environ.get("CRON_MODE", "auto")
-    job = runner.create_job(mode=mode)
-    background.add_task(runner.advance, job, _config())
-    return JSONResponse({"job_id": job.id, "state": job.state, "mode": mode})
-
-
-@app.get("/api/probe")
-def probe(
-    request: Request,
-    secret: str | None = None,
-    x_internal_secret: str | None = Header(default=None),
-) -> JSONResponse:
-    """Ověří, že dotazy v queries.py sedí na aktuální schéma Sorare.
-
-    Baseballová část API se mění a hůř se dokumentuje než fotbalová — tohle
-    spusť po každém delším výpadku, ideálně dřív než ti uteče gameweek.
+    Dřív tady vznikal nový job při každém volání — v 14:00 UTC tak šly
+    sestavy ven dávno před ohlášením startérů. Teď se rozhoduje stejně jako
+    v /api/tick podle skutečné uzávěrky.
     """
-    _check_secret(x_internal_secret or secret, request)
-    import traceback
-
+    _check_secret(x_internal_secret, request)
+    from sorare_mlb import calibration, scheduler
     from sorare_mlb.client import SorareClient
 
-    try:
-        client = SorareClient(_config())
-        schema = client.introspect_root()
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse(
-            {
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc()[-1500:],
-            },
-            status_code=200,
-        )
-
-    q = {f["name"] for f in (schema.get("queryType") or {}).get("fields", [])}
-    m = {f["name"] for f in (schema.get("mutationType") or {}).get("fields", [])}
-
-    # Vytáhneme jen to, co potřebujeme — schéma má přes milion znaků.
-    def fields_of(type_name: str, contains: tuple[str, ...] = ()) -> list[str]:
+    config = _config()
+    status_ = token_status()
+    client = SorareClient(config) if status_["authenticated"] else None
+    evaluated = None
+    if client is not None:
         try:
-            info = client.introspect_type(type_name)
+            evaluated = calibration.evaluate(config, client)
         except Exception as exc:  # noqa: BLE001
-            return [f"<chyba: {exc}>"]
-        if not info:
-            return ["<typ neexistuje>"]
-        names = [f["name"] for f in (info.get("fields") or [])]
-        if contains:
-            names = [
-                n for n in names
-                if any(c.lower() in n.lower() for c in contains)
-            ]
-        return sorted(names)
-
-    def input_fields_of(type_name: str) -> list[str]:
-        try:
-            info = client.introspect_type(type_name)
-        except Exception as exc:  # noqa: BLE001
-            return [f"<chyba: {exc}>"]
-        if not info:
-            return ["<typ neexistuje>"]
-        return sorted(f["name"] for f in (info.get("inputFields") or []))
-
-    relevant = ("baseball", "so5", "card", "fixture", "lineup", "competition")
-
-    inputs = {
-        name: input_fields_of(name)
-        for name in (
-            "So5LineupInput", "createOrUpdateSo5LineupInput",
-            "submitSo5LineupInput", "So5AppearanceInput", "AppearanceInput",
-            "createSo5LineupInput", "updateSo5LineupInput",
-        )
-    }
-
-    types = {
-        "Query": sorted(q),
-        "So5Root": fields_of("So5Root"),
-        "CurrentUser": fields_of("CurrentUser", relevant),
-        "So5Fixture": fields_of("So5Fixture"),
-        "So5Competition": fields_of("So5Competition"),
-        "So5Lineup": fields_of("So5Lineup"),
-        "Mutation": sorted(n for n in m if any(
-            c in n.lower() for c in ("lineup", "so5", "baseball")
-        )),
-    }
-
-    return JSONResponse(
-        {
-            "input_fields": inputs,
-            "types": types,
-            "hint": "Pošli tenhle výstup celý — podle něj se opraví queries.py.",
-        }
-    )
+            evaluated = f"chyba: {exc}"[:200]
+    result = scheduler.tick(config, client, status_)
+    return JSONResponse({**result, "calibration_evaluated": evaluated})
 
 
 @app.get("/api/schema")
